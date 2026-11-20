@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Keyboard, KeyboardAvoidingView, Platform, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import { Keyboard, KeyboardAvoidingView, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react-native";
 import { ChevronDown, Menu, Settings2 } from "lucide-react-native";
@@ -48,7 +48,7 @@ function Chat() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="dark-content" />
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.safe}>
+      <KeyboardAvoidingView behavior="padding" style={styles.safe}>
         <View style={styles.layout}>
           <View style={styles.header}>
             <Pressable accessibilityRole="button" accessibilityLabel="打开对话列表" onPress={() => show("history")} style={({ pressed }) => [styles.icon, pressed && styles.pressed]}>

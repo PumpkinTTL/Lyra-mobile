@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { ArrowLeft, Check, ChevronRight, Cpu, Plus, Server, Trash2, X } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { type ModelRef, type Provider, protocols, providerRef, safeModelError, sameModel } from "./model-catalog";
@@ -85,7 +85,7 @@ export function ModelSheet({ initialPage, providers, current, onClose, onSelect,
   return (
     <Modal animationType="slide" onRequestClose={close}>
       <SafeAreaView style={styles.safe}>
-        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.safe}>
+        <KeyboardAvoidingView behavior="padding" style={styles.safe}>
           <View style={styles.header}>
             <Pressable accessibilityRole="button" accessibilityLabel={back ? "返回" : "关闭设置"} onPress={close} disabled={busy} style={styles.icon}>
               {back ? <ArrowLeft color={colors.text} size={22} /> : <X color={colors.text} size={22} />}
