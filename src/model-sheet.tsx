@@ -27,7 +27,7 @@ export function ModelSheet({ initialPage, providers, current, onClose, onSelect,
   const currentProvider = providers.find((provider) => provider.id === current?.providerId);
   const activeLabel = current
     ? currentProvider?.models.includes(current.model) ? current.model : "模型不可用"
-    : "体验模式";
+    : "未选择模型";
 
   function edit(provider?: Provider) {
     setError("");
@@ -133,7 +133,7 @@ export function ModelSheet({ initialPage, providers, current, onClose, onSelect,
             ) : null}
             {page === "models" ? (
               <>
-                {modelRow("体验模式", "在手机上运行本地示例", null)}
+                {modelRow("未选择模型", undefined, null)}
                 {providers.map((provider) => (
                   <View key={provider.id} style={styles.group}>
                     <Text style={styles.section}>{provider.name}</Text>

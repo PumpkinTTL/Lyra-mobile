@@ -1,25 +1,27 @@
-import type { AgentMessage, AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
-import { Agent, createFauxCore, fauxAssistantMessage, fauxToolCall, streamAnthropic, streamGoogle, streamOpenAI } from "./pi-runtime";
+import type { AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ImageContent, Model, TextContent, UserMessage } from "@earendil-works/pi-ai";
+import { Agent, streamAnthropic, streamGoogle, streamOpenAI } from "./pi-runtime";
 import { safeModelError, type ModelConnection } from "./model-catalog";
 
-const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言回复，保持简洁。用户要求读取示例笔记时使用 read_local_note。";
+const systemPrompt = "你是 Lyra 的移动端编程助手。使用用户的语言，用工作区工具实际完成任务。路径一律相对于 /workspace。通过 ls、find 和 grep 了解项目，使用 read 检查文件，用 edit 或 write 修改文件，用 bash 运行工作区里的脚本和命令。说明实际做过的更改与验证。";
 
 type Options = {
-  settings: ModelConnection | null;
-  readLocalNote?: () => Promise<string>;
+  settings: ModelConnection;
+  tools?: AgentTool[];
+  thinking?: ThinkingLevel;
+  projectName?: string;
   messages?: AgentMessage[];
   fetch?: typeof fetch;
   probe?: boolean;
 };
 
-function configureModel(settings: ModelConnection, request: typeof fetch, probe: boolean): { model: Model<string>; streamFn: StreamFn } {
+function configureModel(settings: ModelConnection, request: typeof fetch, probe: boolean, thinking: ThinkingLevel): { model: Model<string>; streamFn: StreamFn } {
   const common = {
     id: settings.model,
     name: settings.model,
     baseUrl: settings.endpoint,
-    reasoning: false,
-    input: ["text" as const],
+    reasoning: thinking !== "off",
+    input: ["text" as const, "image" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 32_768,
     maxTokens: probe ? 128 : 4096,
@@ -52,45 +54,37 @@ function configureModel(settings: ModelConnection, request: typeof fetch, probe:
   }
 }
 
-export function createLocalAgent({ settings, readLocalNote, messages, fetch: request = fetch, probe = false }: Options) {
-  const tools: AgentTool[] = readLocalNote ? [{
-    name: "read_local_note",
-    label: "读取本地笔记",
-    description: "Read the sample note stored in Lyra on this device.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    async execute() {
-      return { content: [{ type: "text", text: await readLocalNote() }], details: {} };
-    },
-  }] : [];
-  const demo = settings ? null : createFauxCore({ tokensPerSecond: 36 });
-  const { model, streamFn } = settings
-    ? configureModel(settings, request, probe)
-    : { model: demo!.getModel(), streamFn: demo!.streamSimple };
+export type LocalUserMessage = UserMessage & {
+  lyraDisplayText?: string;
+  lyraAttachments?: { name: string; path: string; mime: string }[];
+};
 
+export function createLocalAgent({ settings, tools = [], thinking = "off", projectName, messages, fetch: request = fetch, probe = false }: Options) {
+  const { model, streamFn } = configureModel(settings, request, probe, thinking);
+  const prompt = projectName ? systemPrompt + " 当前工作区：" + projectName : systemPrompt;
   const agent = new Agent({
-    initialState: { model, systemPrompt: probe ? "Reply briefly in plain text." : systemPrompt, tools, messages },
+    initialState: {
+      model, thinkingLevel: thinking, systemPrompt: probe ? "Reply briefly in plain text." : prompt,
+      tools, messages: messages?.filter((message) => message.role !== "system"),
+    },
     streamFn,
     toolExecution: "sequential",
   });
-
   return {
     agent,
-    send(text: string) {
-      if (demo) {
-        const tool = tools[0];
-        const useTool = tool && /笔记|读取|示例|note|demo/i.test(text);
-        demo.setResponses(useTool ? [
-          fauxAssistantMessage(fauxToolCall(tool.name, {})),
-          (context) => {
-            const result = [...context.messages].reverse().find((message) => message.role === "toolResult");
-            const content = result?.content.find((part) => part.type === "text");
-            return fauxAssistantMessage(content ? "已读取本地笔记。\n\n" + content.text : "读取笔记失败。");
-          },
-        ] : [fauxAssistantMessage("体验模式已就绪。试试让我读取示例笔记，或者打开设置连接你的模型。")]);
-      }
-      return agent.prompt(text);
+    send(message: string | LocalUserMessage) {
+      if (typeof message === "string") return agent.prompt(message);
+      return agent.prompt(message);
     },
   };
+}
+
+export function localUserMessage(
+  displayText: string,
+  content: (ImageContent | TextContent)[],
+  attachments: LocalUserMessage["lyraAttachments"] = [],
+): LocalUserMessage {
+  return { role: "user", content, timestamp: Date.now(), lyraDisplayText: displayText, lyraAttachments: attachments };
 }
 
 export async function testModelConnection(settings: ModelConnection, request: typeof fetch, signal?: AbortSignal): Promise<void> {

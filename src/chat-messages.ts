@@ -1,6 +1,10 @@
 import type { ThreadMessageLike } from "@assistant-ui/react-native";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { LocalUserMessage } from "./agent";
 import { safeModelError } from "./model-catalog";
+
+export type AgentPhase = "waiting" | "thinking" | "tool" | "writing";
+export type ToolRun = { state: "running" | "done" | "error"; output?: string; duration?: number };
 
 export function toThreadMessages(
   messages: readonly AgentMessage[],
@@ -18,10 +22,18 @@ export function toThreadMessages(
     const id = conversationId + ":" + index;
     const createdAt = new Date(message.timestamp);
     if (message.role === "user") {
-      const text = typeof message.content === "string"
-        ? message.content
-        : message.content.map((part) => part.type === "text" ? part.text : "").join("");
-      return [{ id, role: "user", createdAt, content: text }];
+      const local = message as LocalUserMessage;
+      const parts = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+      const text = local.lyraDisplayText ?? parts.map((part) => part.type === "text" ? part.text : "").join("");
+      const content: Exclude<ThreadMessageLike["content"], string>[number][] = [];
+      if (text) content.push({ type: "text", text });
+      for (const part of parts) {
+        if (part.type === "image") content.push({ type: "image", image: "data:" + part.mimeType + ";base64," + part.data });
+      }
+      for (const attachment of local.lyraAttachments ?? []) {
+        content.push({ type: "file", filename: attachment.name, mimeType: attachment.mime, data: attachment.path, sourceType: "id" });
+      }
+      return [{ id, role: "user", createdAt, content }];
     }
     if (message.role !== "assistant") return [];
     const content: Exclude<ThreadMessageLike["content"], string>[number][] = [];
@@ -38,7 +50,10 @@ export function toThreadMessages(
           toolName: part.name,
           args: part.arguments,
           ...(result ? {
-            result: result.content.map((item) => item.type === "text" ? item.text : "").join("\n"),
+            result: result.content.some((item) => item.type === "image") ? {
+              text: result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"),
+              images: result.content.filter((item) => item.type === "image").map((item) => "data:" + item.mimeType + ";base64," + item.data),
+            } : result.content.map((item) => item.type === "text" ? item.text : "").join("\n"),
             isError: result.isError,
           } : !busy ? { result: "工具未执行完毕", isError: true } : {}),
         });

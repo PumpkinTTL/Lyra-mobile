@@ -1,4 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { LocalUserMessage } from "./agent";
 import type { ModelRef } from "./model-catalog";
 
 export type Conversation = {
@@ -6,6 +7,9 @@ export type Conversation = {
   title: string;
   updatedAt: number;
   model: ModelRef;
+  projectId?: string;
+  projectName?: string;
+  thinking?: ThinkingLevel;
 };
 
 export type Workspace = {
@@ -26,7 +30,9 @@ export function userTitle(messages: readonly AgentMessage[]) {
   const text = typeof first?.content === "string"
     ? first.content
     : first?.content.map((part) => part.type === "text" ? part.text : "").join("") ?? "";
-  return Array.from(text.replace(/\s+/g, " ").trim()).slice(0, 36).join("");
+  const local = first as LocalUserMessage | undefined;
+  const title = local?.lyraDisplayText || local?.lyraAttachments?.[0]?.name || text;
+  return Array.from(title.replace(/\s+/g, " ").trim()).slice(0, 36).join("");
 }
 
 export function orderedConversations(conversations: readonly Conversation[]) {

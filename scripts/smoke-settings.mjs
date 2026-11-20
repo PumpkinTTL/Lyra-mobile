@@ -12,9 +12,10 @@ const { outputFiles } = await build({
   plugins: [{
     name: "native-test-adapters",
     setup(plugin) {
-      plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native-keychain|react-native-fetch-api)$/ }, (args) =>
+      plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native|react-native-keychain|react-native-fetch-api)$/ }, (args) =>
         ({ path: args.path, namespace: "test" }));
       plugin.onLoad({ filter: /.*/, namespace: "test" }, ({ path }) => {
+        if (path === "react-native") return { contents: "export const NativeModules = {};" };
         if (path.endsWith("async-storage")) return { contents: "export default globalThis.lyraTestStorage;" };
         if (path === "react-native-keychain") return { contents: [
           "export const getGenericPassword = () => globalThis.lyraTestPassword;",

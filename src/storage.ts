@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Keychain from "react-native-keychain";
+import { deleteTranscript, loadTranscript, saveTranscript, workspaceSupported } from "./device-workspace";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { newConversation, userTitle, type Conversation, type Workspace } from "./conversations";
 import { type ModelConnection, type ModelRef, type Provider } from "./model-catalog";
@@ -82,22 +83,21 @@ export function saveWorkspace(workspace: Workspace) {
 }
 
 export async function loadMessages(id: string): Promise<AgentMessage[]> {
-  return parseMessages(await AsyncStorage.getItem(messageKey(id)));
+  const stored = workspaceSupported() ? await loadTranscript(id) : null;
+  return parseMessages(stored ?? await AsyncStorage.getItem(messageKey(id)));
 }
 
-export function saveMessages(workspace: Workspace, id: string, messages: AgentMessage[]) {
-  return AsyncStorage.multiSet([[messageKey(id), JSON.stringify(messages)], [workspaceKey, JSON.stringify(workspace)]]);
+export async function saveMessages(workspace: Workspace, id: string, messages: AgentMessage[]) {
+  const saved = JSON.stringify(messages);
+  if (workspaceSupported()) {
+    await saveTranscript(id, saved);
+    await AsyncStorage.setItem(workspaceKey, JSON.stringify(workspace));
+    return;
+  }
+  await AsyncStorage.multiSet([[messageKey(id), saved], [workspaceKey, JSON.stringify(workspace)]]);
 }
 
-export function removeMessages(id: string) {
-  return AsyncStorage.removeItem(messageKey(id));
-}
-
-export async function readLocalNote(): Promise<string> {
-  const key = "lyra.sample-note.v1";
-  const cached = await AsyncStorage.getItem(key);
-  if (cached !== null) return cached;
-  const note = "项目：Lyra Mobile\n当前里程碑：在手机上跑通本地 Agent 与工具调用。\n下一步：连接你自己的模型。";
-  await AsyncStorage.setItem(key, note);
-  return note;
+export async function removeMessages(id: string) {
+  if (workspaceSupported()) await deleteTranscript(id);
+  await AsyncStorage.removeItem(messageKey(id));
 }

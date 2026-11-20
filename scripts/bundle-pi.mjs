@@ -18,6 +18,7 @@ await build({
   outfile: "src/pi-runtime.js",
   bundle: true,
   platform: "browser",
+  alias: { "node:zlib": "./scripts/mobile-zlib.mjs" },
   format: "esm",
   target: "es2017",
   minify: true,

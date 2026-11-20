@@ -1,34 +1,96 @@
 import { useState } from "react";
-import { Keyboard, KeyboardAvoidingView, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import { Alert, Keyboard, KeyboardAvoidingView, Modal, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react-native";
-import { ChevronDown, Menu, Settings2 } from "lucide-react-native";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Check, Menu, Settings2, X } from "lucide-react-native";
 import { ConversationDrawer } from "./src/conversation-drawer";
 import { ModelSheet } from "./src/model-sheet";
-import { demoPrompt, Thread } from "./src/thread";
+import { WorkspaceSheet } from "./src/workspace-sheet";
+import { defaultProject, pickAttachments, workspaceSupported, type WorkspaceAttachment } from "./src/device-workspace";
+import { safeModelError } from "./src/model-catalog";
+import { Thread } from "./src/thread";
 import { colors } from "./src/theme";
 import { useLocalChat } from "./src/use-local-chat";
 
 const convertMessage = (message: ThreadMessageLike) => message;
 type ChatState = ReturnType<typeof useLocalChat>;
-type Panel = "history" | "settings" | "models";
+type Panel = "history" | "settings" | "models" | "workspace" | "thinking";
+const levels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
 
-function ChatRuntime({ chat, onModels }: { chat: ChatState; onModels: () => void }) {
+function ChatRuntime({ chat, show }: { chat: ChatState; show: (panel: Panel) => void }) {
+  const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
+  const [picking, setPicking] = useState(false);
+  const [attachmentError, setAttachmentError] = useState("");
+  const blocked = !chat.canSend || chat.busy || picking;
+
+  async function send(text: string) {
+    if (picking) return;
+    setAttachmentError("");
+    if (await chat.send(text, attachments)) setAttachments([]);
+  }
+
+  async function attach() {
+    if (blocked || chat.running) return;
+    setAttachmentError("");
+    setPicking(true);
+    try {
+      const files = await pickAttachments(chat.current?.projectId ?? defaultProject);
+      if (!files) return;
+      if (attachments.length + files.length > 6) throw new Error("一条消息最多添加 6 个附件。");
+      setAttachments((previous) => [...previous, ...files]);
+    } catch (error) {
+      setAttachmentError(safeModelError(error));
+    } finally {
+      setPicking(false);
+    }
+  }
+
   const runtime = useExternalStoreRuntime({
     messages: chat.messages,
     convertMessage,
     isRunning: chat.running,
-    isDisabled: !chat.canSend || chat.busy,
+    isDisabled: blocked,
     onNew: async (message: AppendMessage) => {
-      await chat.send(message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join(""));
+      await send(message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join(""));
     },
     onCancel: async () => { chat.stop(); },
   });
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread ready={chat.ready} canSend={chat.canSend} running={chat.running} busy={chat.busy} demo={!chat.current?.model}
-        error={chat.error} onModels={onModels} onRetry={chat.retry} onTryDemo={() => { void chat.send(demoPrompt); }} />
+      <Thread ready={chat.ready} canSend={chat.canSend} error={attachmentError || chat.error} phase={chat.phase} toolRuns={chat.toolRuns} onRetry={chat.retry}
+        composer={{
+          editable: !blocked, running: chat.running, modelLabel: chat.current?.model ? chat.canSend ? chat.current.model.model : "模型不可用" : "选择模型",
+          thinkingLabel: levels[chat.current?.thinking ?? "off"], projectName: chat.current?.projectName ?? "本机工作区", attachments,
+          onModels: () => show("models"), onThinking: () => show("thinking"), onWorkspace: () => show("workspace"),
+          onPickAttachments: () => { void attach(); }, onRemoveAttachment: (path) => setAttachments((items) => items.filter((item) => item.path !== path)),
+          onSendAttachments: () => { void send(""); },
+        }} />
     </AssistantRuntimeProvider>
+  );
+}
+
+function ThinkingSheet({ current, onSelect, onClose }: { current: ThinkingLevel; onSelect(level: ThinkingLevel): void; onClose(): void }) {
+  return (
+    <Modal animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.header}>
+          <Pressable accessibilityRole="button" accessibilityLabel="关闭思考级别" onPress={onClose} style={styles.icon}><X size={22} color={colors.text} /></Pressable>
+          <Text style={styles.title}>思考级别</Text><View style={styles.icon} />
+        </View>
+        <ScrollView contentContainerStyle={styles.options}>
+          <Text style={styles.hint}>只有支持推理的模型才会返回思考过程。</Text>
+          {(Object.keys(levels) as ThinkingLevel[]).map((level) => (
+            <Pressable key={level} accessibilityRole="radio" accessibilityState={{ checked: current === level }}
+              onPress={() => onSelect(level)} style={[styles.option, current === level && styles.selected]}>
+              <Text style={styles.optionLabel}>{levels[level]}</Text>
+              {current === level ? <Check color={colors.accent} size={19} /> : null}
+            </Pressable>
+          ))}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -39,6 +101,10 @@ function Chat() {
 
   function show(next: Panel) {
     if (locked && next !== "history") return;
+    if (next === "workspace" && !workspaceSupported()) {
+      Alert.alert("工作区", "此安装包没有工作区模块。");
+      return;
+    }
     Keyboard.dismiss();
     setPanel(next);
   }
@@ -51,26 +117,15 @@ function Chat() {
       <KeyboardAvoidingView behavior="padding" style={styles.safe}>
         <View style={styles.layout}>
           <View style={styles.header}>
-            <Pressable accessibilityRole="button" accessibilityLabel="打开对话列表" onPress={() => show("history")} style={({ pressed }) => [styles.icon, pressed && styles.pressed]}>
+            <Pressable accessibilityRole="button" accessibilityLabel="打开对话列表" onPress={() => show("history")} style={styles.icon}>
               <Menu size={23} color={colors.text} />
             </Pressable>
-            <View style={styles.brand}>
-              <Text style={styles.logo}>Lyra</Text>
-              <Pressable accessibilityRole="button" accessibilityLabel="选择模型" disabled={locked} onPress={() => show("models")} style={({ pressed }) => [styles.model, pressed && styles.pressed]}>
-                <Text style={styles.modelLabel} numberOfLines={1}>{chat.current?.model ? chat.canSend ? chat.current.model.model : "模型不可用" : "体验模式"}</Text>
-                <ChevronDown size={13} color={colors.accent} />
-              </Pressable>
-            </View>
-            <Pressable accessibilityRole="button" accessibilityLabel="设置" disabled={locked} onPress={() => show("settings")} style={({ pressed }) => [styles.settings, locked && styles.disabled, pressed && styles.pressed]}>
-              <Settings2 size={18} color={colors.accent} /><Text style={styles.settingsLabel}>设置</Text>
+            <Text style={styles.title} numberOfLines={1}>{chat.current?.title || "Lyra"}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="设置" disabled={locked} onPress={() => show("settings")} style={[styles.settings, locked && styles.disabled]}>
+              <Settings2 size={19} color={colors.text} /><Text style={styles.settingsLabel}>设置</Text>
             </Pressable>
           </View>
-          {chat.ready && !chat.canSend && chat.messages.length ? (
-            <Pressable accessibilityRole="button" onPress={() => show("models")} style={styles.modelMissing}>
-              <Text style={styles.settingsLabel}>当前模型不可用，点此重新选择</Text><ChevronDown size={15} color={colors.accent} />
-            </Pressable>
-          ) : null}
-          <ChatRuntime key={chat.current?.id ?? "loading"} chat={chat} onModels={() => show("models")} />
+          <ChatRuntime key={(chat.current?.id ?? "loading") + ":" + (chat.current?.projectId ?? defaultProject)} chat={chat} show={show} />
         </View>
       </KeyboardAvoidingView>
       {panel === "history" ? (
@@ -80,6 +135,11 @@ function Chat() {
       {panel === "settings" || panel === "models" ? (
         <ModelSheet initialPage={panel} providers={chat.providers} current={chat.current?.model ?? null} onClose={close}
           onSelect={chat.chooseModel} onSave={chat.updateProvider} onDelete={chat.deleteProvider} />
+      ) : null}
+      {panel === "workspace" ? <WorkspaceSheet current={chat.current?.projectId ?? defaultProject} onClose={close} onSelect={chat.chooseProject} /> : null}
+      {panel === "thinking" ? (
+        <ThinkingSheet current={chat.current?.thinking ?? "off"} onClose={close}
+          onSelect={(level) => { void chat.chooseThinking(level).then(close).catch((error) => Alert.alert("思考级别", safeModelError(error))); }} />
       ) : null}
     </SafeAreaView>
   );
@@ -92,15 +152,15 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   layout: { flex: 1, width: "100%", maxWidth: 700, alignSelf: "center" },
-  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, minHeight: 57, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.surface, gap: 7 },
-  brand: { flex: 1, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 7 },
-  logo: { color: colors.text, fontSize: 24, fontWeight: "700", letterSpacing: -0.9 },
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 11, minHeight: 55, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.surface, gap: 6 },
+  title: { flex: 1, textAlign: "center", color: colors.text, fontSize: 19, fontWeight: "700" },
   icon: { height: 44, width: 44, justifyContent: "center", alignItems: "center", borderRadius: 12 },
-  model: { maxWidth: "74%", flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 3, minHeight: 34, paddingHorizontal: 8, borderRadius: 8, backgroundColor: colors.tint },
-  modelLabel: { color: colors.accent, fontSize: 13, fontWeight: "600", flexShrink: 1 },
-  settings: { flexDirection: "row", alignItems: "center", minHeight: 44, gap: 6, paddingHorizontal: 7, borderRadius: 10 },
-  settingsLabel: { color: colors.accent, fontWeight: "600", fontSize: 14 },
-  modelMissing: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, padding: 10, backgroundColor: colors.tint },
+  settings: { flexDirection: "row", alignItems: "center", minHeight: 44, paddingHorizontal: 6, gap: 5 },
+  settingsLabel: { color: colors.text, fontWeight: "600", fontSize: 14 },
   disabled: { opacity: 0.45 },
-  pressed: { backgroundColor: colors.raised },
+  options: { width: "100%", maxWidth: 600, alignSelf: "center", padding: 17, gap: 8 },
+  hint: { color: colors.secondary, fontSize: 14, marginBottom: 5 },
+  option: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 47, paddingHorizontal: 13, borderRadius: 11, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  optionLabel: { color: colors.text, fontSize: 15 },
+  selected: { backgroundColor: colors.tint, borderColor: colors.tintBorder },
 });
