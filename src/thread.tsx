@@ -1,6 +1,6 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { ComposerPrimitive, ErrorPrimitive, MessagePrimitive, ThreadPrimitive } from "@assistant-ui/react-native";
-import { ArrowUp, BookOpen, Check, ChevronRight, Square, TriangleAlert } from "lucide-react-native";
+import { ArrowUp, BookOpen, Check, ChevronRight, Settings2, Square, TriangleAlert } from "lucide-react-native";
 import { useMarkdown } from "react-native-marked";
 import { colors } from "./theme";
 
@@ -8,10 +8,14 @@ export const demoPrompt = "读取手机中的示例笔记，告诉我下一步�
 
 type Props = {
   ready: boolean;
+  canSend: boolean;
+  busy: boolean;
   running: boolean;
   demo: boolean;
   error: string;
   onTryDemo: () => void;
+  onModels: () => void;
+  onRetry: () => void;
 };
 
 const markdownStyles = {
@@ -24,7 +28,7 @@ const markdownStyles = {
 };
 
 function MarkdownText({ text }: { text: string }) {
-  const content = useMarkdown(text, { colorScheme: "dark", styles: markdownStyles });
+  const content = useMarkdown(text, { colorScheme: "light", styles: markdownStyles });
   return <View>{content}</View>;
 }
 
@@ -70,17 +74,27 @@ function MessageError() {
   );
 }
 
-function Welcome({ ready, running, demo, onTryDemo }: Omit<Props, "error">) {
+function Welcome({ ready, canSend, running, busy, demo, error, onModels, onRetry, onTryDemo }: Props) {
   return (
     <View style={styles.welcome}>
       <View style={styles.welcomeIcon}><BookOpen size={25} color={colors.accent} strokeWidth={1.7} /></View>
-      <Text style={styles.title}>在本机开始对话</Text>
-      <Text style={styles.subtitle}>{!ready ? "正在载入本机会话…" : demo ? "用一条示例笔记体验 Pi 的工具调用。" : "输入消息开始，工具将在这台手机上执行。"}</Text>
-      {ready && demo ? (
+      <Text style={styles.title}>开始对话</Text>
+      <Text style={styles.subtitle}>{!ready ? error ? "本地数据载入失败" : "正在载入本机会话…" : !canSend ? "请为此对话重新选择一个模型。" : demo ? "连接模型开始聊天，或先试一次本地工具。" : "输入消息开始，工具将在这台手机上执行。"}</Text>
+      {!ready && error ? (
+        <Pressable accessibilityRole="button" onPress={onRetry} style={styles.tryDemo}><Text style={styles.tryText}>重试</Text></Pressable>
+      ) : null}
+      {ready && (demo || !canSend) ? (
+        <Pressable accessibilityRole="button" disabled={busy || running} onPress={onModels} style={styles.connect}>
+          <Settings2 size={17} color={colors.accentInk}/>
+          <Text style={styles.connectText}>{canSend ? "配置模型" : "选择模型"}</Text>
+          <ChevronRight size={18} color={colors.accentInk} />
+        </Pressable>
+      ) : null}
+      {ready && canSend && demo ? (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="运行工具示例"
-          disabled={running}
+          disabled={running || busy}
           onPress={onTryDemo}
           style={({ pressed }) => [styles.tryDemo, pressed && styles.pressed]}
         >
@@ -92,13 +106,14 @@ function Welcome({ ready, running, demo, onTryDemo }: Omit<Props, "error">) {
   );
 }
 
-export function Thread({ ready, running, demo, error, onTryDemo }: Props) {
+export function Thread(props: Props) {
+  const { ready, canSend, running, busy, error } = props;
   return (
     <ThreadPrimitive.Root style={styles.root}>
       <ThreadPrimitive.MessagesFlatList
         style={styles.list}
         contentContainerStyle={styles.messages}
-        ListEmptyComponent={<Welcome ready={ready} running={running} demo={demo} onTryDemo={onTryDemo} />}
+        ListEmptyComponent={<Welcome {...props} />}
         autoScroll
         keyboardShouldPersistTaps="handled"
       >
@@ -110,7 +125,7 @@ export function Thread({ ready, running, demo, error, onTryDemo }: Props) {
           accessibilityLabel="消息"
           placeholder="给 Lyra 发消息"
           placeholderTextColor={colors.secondary}
-          editable={ready && !running}
+          editable={ready && canSend && !running && !busy}
           multiline
           style={styles.input}
         />
@@ -119,7 +134,7 @@ export function Thread({ ready, running, demo, error, onTryDemo }: Props) {
             <Square size={17} fill={colors.accentInk} color={colors.accentInk} />
           </ComposerPrimitive.Cancel>
         ) : (
-          <ComposerPrimitive.Send accessibilityLabel="发送消息" style={({ pressed }) => [styles.send, pressed && styles.pressed]}>
+          <ComposerPrimitive.Send accessibilityLabel="发送消息" disabled={!ready || !canSend || busy} style={({ pressed }) => [styles.send, (!ready || !canSend || busy || pressed) && styles.pressed]}>
             <ArrowUp size={22} color={colors.accentInk} strokeWidth={2.4} />
           </ComposerPrimitive.Send>
         )}
@@ -138,6 +153,8 @@ const styles = StyleSheet.create({
   title: { color: colors.text, fontSize: 25, fontWeight: "600", textAlign: "center", marginBottom: 8 },
   subtitle: { color: colors.secondary, fontSize: 15, lineHeight: 23, textAlign: "center", marginBottom: 22 },
   tryDemo: { flexDirection: "row", alignItems: "center", gap: 14, minHeight: 46, paddingHorizontal: 15, borderRadius: 12, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  connect: { minHeight: 46, borderRadius: 12, paddingHorizontal: 15, flexDirection: "row", alignItems: "center", gap: 9, backgroundColor: colors.accent, marginBottom: 9 },
+  connectText: { color: colors.accentInk, fontSize: 15, fontWeight: "600" },
   tryText: { color: colors.text, fontWeight: "500" },
   pressed: { opacity: 0.75 },
   userBubble: { alignSelf: "flex-end", maxWidth: "90%", backgroundColor: colors.raised, paddingHorizontal: 15, paddingVertical: 10, borderRadius: 16, borderBottomRightRadius: 5 },

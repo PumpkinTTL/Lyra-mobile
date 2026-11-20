@@ -1,10 +1,13 @@
 import type { ThreadMessageLike } from "@assistant-ui/react-native";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { safeModelError } from "./model-catalog";
 
 export function toThreadMessages(
   messages: readonly AgentMessage[],
   partial: AgentMessage | undefined,
   busy: boolean,
+  conversationId = "",
+  apiKey = "",
 ): ThreadMessageLike[] {
   const all = partial ? [...messages, partial] : messages;
   const results = new Map(
@@ -12,7 +15,7 @@ export function toThreadMessages(
   );
 
   return all.flatMap((message, index): ThreadMessageLike[] => {
-    const id = String(index);
+    const id = conversationId + ":" + index;
     const createdAt = new Date(message.timestamp);
     if (message.role === "user") {
       const text = typeof message.content === "string"
@@ -50,7 +53,7 @@ export function toThreadMessages(
       status: message.stopReason === "aborted"
         ? { type: "incomplete", reason: "cancelled" }
         : message.errorMessage
-          ? { type: "incomplete", reason: "error", error: message.errorMessage }
+          ? { type: "incomplete", reason: "error", error: safeModelError(message.errorMessage, apiKey) }
           : message === partial && busy
             ? { type: "running" }
             : { type: "complete", reason: "stop" },

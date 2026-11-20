@@ -1,12 +1,12 @@
 {
   "name": "lyra-mobile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "build:pi": "node scripts/bundle-pi.mjs",
     "postinstall": "npm run build:pi",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/smoke-agent.mjs"
+    "test": "node scripts/smoke-agent.mjs && node scripts/smoke-settings.mjs"
   },
   "dependencies": {
     "@assistant-ui/react-native": "0.1.52",
