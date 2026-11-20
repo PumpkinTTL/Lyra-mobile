@@ -1,0 +1,80 @@
+name: Mobile builds
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ios_simulator:
+        description: Build the unsigned iOS simulator app
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Install dependencies and prepare Pi
+        run: npm ci
+      - name: Check app
+        run: npm run typecheck && npm test
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006'
+      - name: Build installable Android preview
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a,x86_64 --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lyra-Android-preview
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+  ios:
+    if: github.event_name == 'workflow_dispatch' && inputs.ios_simulator
+    runs-on: macos-26
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+      - name: Install dependencies and prepare Pi
+        run: npm ci
+      - name: Install iOS pods
+        run: bundle exec pod install --project-directory=ios
+      - name: Build iOS simulator app
+        run: |
+          xcodebuild -workspace ios/LyraMobile.xcworkspace -scheme LyraMobile \
+            -configuration Release -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/lyra-ios" CODE_SIGNING_ALLOWED=NO build
+          ditto -c -k --keepParent "$RUNNER_TEMP/lyra-ios/Build/Products/Release-iphonesimulator/LyraMobile.app" "$RUNNER_TEMP/Lyra-iOS-simulator.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lyra-iOS-simulator
+          path: ${{ runner.temp }}/Lyra-iOS-simulator.zip
+          if-no-files-found: error

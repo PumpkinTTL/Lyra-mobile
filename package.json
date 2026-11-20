@@ -1,0 +1,44 @@
+{
+  "name": "lyra-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:pi": "node scripts/bundle-pi.mjs",
+    "postinstall": "npm run build:pi",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/smoke-agent.mjs"
+  },
+  "dependencies": {
+    "@assistant-ui/react-native": "0.1.52",
+    "@earendil-works/pi-agent-core": "1.6.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@ungap/structured-clone": "1.4.0",
+    "lucide-react-native": "^1.77.0",
+    "react": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-fetch-api": "3.0.0",
+    "react-native-keychain": "11.0.0",
+    "react-native-marked": "^8.3.4",
+    "react-native-safe-area-context": "^5.11.1",
+    "react-native-svg": "^15.15.0",
+    "web-streams-polyfill": "4.5.1"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@babel/preset-env": "^7.25.3",
+    "@babel/runtime": "^7.25.0",
+    "@react-native-community/cli": "20.2.0",
+    "@react-native-community/cli-platform-android": "20.2.0",
+    "@react-native-community/cli-platform-ios": "20.2.0",
+    "@react-native/babel-preset": "0.88.1",
+    "@react-native/metro-config": "0.88.1",
+    "@react-native/typescript-config": "0.88.1",
+    "@types/react": "^19.2.0",
+    "esbuild": "^0.28.0",
+    "typescript": "~6.0.3"
+  },
+  "engines": {
+    "node": "^22.19.0 || ^24.3.0 || >=26.0.0"
+  }
+}
