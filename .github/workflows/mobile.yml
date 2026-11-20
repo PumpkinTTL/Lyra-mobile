@@ -36,8 +36,12 @@ jobs:
         run: npm ci
       - name: Check app
         run: npm run typecheck && npm test
-      - name: Install Android SDK
-        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+        with:
+          cmdline-tools-version: '16111833'
+          packages: 'platform-tools platforms;android-37.0 build-tools;37.0.0 ndk;27.1.12297006'
+          log-accepted-android-sdk-licenses: false
       - name: Build installable Android preview
         working-directory: android
         run: |
