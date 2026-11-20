@@ -38,7 +38,15 @@ const openai = normalizeProvider(provider);
 assert.equal(openai.name, "上游模型");
 assert.equal(openai.endpoint, "https://example.invalid/v1");
 assert.deepEqual(openai.models, ["model-a"]);
-assert.throws(() => normalizeProvider({ ...provider, endpoint: "http://example.invalid/v1" }), /HTTPS/);
+const http = normalizeProvider({ ...provider, endpoint: "http://models.example.invalid:8080/v1/" });
+assert.equal(http.endpoint, "http://models.example.invalid:8080/v1");
+assert.equal(normalizeProvider({ ...provider, endpoint: "http://203.0.113.10:11434/v1" }).endpoint, "http://203.0.113.10:11434/v1");
+assert.throws(() => normalizeProvider({ ...provider, endpoint: "ftp://example.invalid/v1" }), /http/);
+assert.deepEqual(await fetchProviderModels(http, async (url, options) => {
+  assert.equal(url, http.endpoint + "/models");
+  assert.equal(options.headers.Authorization, "Bearer test-key");
+  return Response.json({ data: [{ id: "http-model" }] });
+}), ["http-model"]);
 assert.equal(normalizeProvider({ ...provider, endpoint: "http://192.168.1.10:11434/v1", apiKey: "" }).apiKey, "");
 assert.throws(() => normalizeProvider({ ...provider, apiKey: "" }), /Key/);
 

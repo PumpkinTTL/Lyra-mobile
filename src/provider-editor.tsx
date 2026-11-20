@@ -134,11 +134,12 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
       <TextInput accessibilityLabel="API 基础地址" style={styles.input} editable={!disabled} value={draft.endpoint}
         onChangeText={(value) => update("endpoint", value)} placeholder={protocols[draft.protocol].endpoint} placeholderTextColor={colors.secondary}
         autoCapitalize="none" autoCorrect={false} keyboardType="url" />
+      <Text style={styles.caption}>支持 HTTP 和 HTTPS，请填写手机能访问的服务地址。</Text>
       <Text style={styles.label}>API Key</Text>
       <TextInput accessibilityLabel="API Key" style={styles.input} editable={!disabled} value={draft.apiKey}
         onChangeText={(value) => update("apiKey", value)} placeholder="输入供应商提供的 Key" placeholderTextColor={colors.secondary}
         autoCapitalize="none" autoCorrect={false} secureTextEntry />
-      {draft.endpoint.trim().toLowerCase().startsWith("http://") ? <Text style={styles.caption}>局域网 HTTP 不加密。服务无需鉴权时，Key 可留空。</Text> : null}
+      {draft.endpoint.trim().toLowerCase().startsWith("http://") ? <Text style={styles.caption}>HTTP 以明文传输。服务无需鉴权时，Key 可留空。</Text> : null}
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>模型</Text>
         <Pressable accessibilityRole="button" disabled={disabled} onPress={() => { void operate("list"); }} style={styles.fetch}>

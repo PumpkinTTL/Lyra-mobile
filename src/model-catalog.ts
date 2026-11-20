@@ -24,14 +24,6 @@ export function resolveConnection(providers: readonly Provider[], ref: ModelRef)
   return { endpoint: provider.endpoint, apiKey: provider.apiKey, protocol: provider.protocol, model: ref.model };
 }
 
-function isLocalHost(host: string) {
-  if (host === "localhost" || host === "[::1]" || host.endsWith(".local")) return true;
-  const parts = host.split(".");
-  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false;
-  const [first, second] = parts.map(Number);
-  return first === 127 || first === 10 || (first === 192 && second === 168) || (first === 172 && second >= 16 && second <= 31);
-}
-
 export function normalizeProvider(draft: Provider): Provider {
   const name = draft.name.trim();
   if (!name) throw new Error("请填写供应商名称。");
@@ -40,14 +32,14 @@ export function normalizeProvider(draft: Provider): Provider {
   try {
     url = new URL(draft.endpoint.trim());
   } catch {
-    throw new Error("请填写完整的 API 基础地址。");
+    throw new Error("请填写完整的 API 基础地址，以 http:// 或 https:// 开头。");
   }
 
   if (!url.hostname || url.username || url.password || url.search || url.hash) {
     throw new Error("API 地址中不能包含账号、密码、查询参数或片段。");
   }
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLocalHost(url.hostname))) {
-    throw new Error("请使用 HTTPS。HTTP 仅支持本机和局域网地址。");
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("API 地址请以 http:// 或 https:// 开头。");
   }
 
   let endpoint = url.toString().replace(/\/+$/, "");
