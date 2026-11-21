@@ -38,6 +38,10 @@ export function providerRef(provider: Provider, model: string): ModelRef {
   return { providerId: provider.id, model };
 }
 
+export function modelNickname(model: string): string {
+  return model.split("/").filter(Boolean).at(-1) ?? model;
+}
+
 export function sameModel(first: ModelRef, second: ModelRef): boolean {
   return first?.providerId === second?.providerId && first?.model === second?.model;
 }

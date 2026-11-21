@@ -41,6 +41,8 @@ async function loadProviders(): Promise<{ providers: Provider[]; legacyModel: Mo
 }
 
 export async function openStorage(): Promise<{ providers: Provider[]; workspace: Workspace }> {
+  // Retire SSH presets from older installations without reading their credentials.
+  await Keychain.resetGenericPassword({ service: "com.lyramobile.ssh" }).catch(() => {});
   const { providers, legacyModel } = await loadProviders();
   const existing = await AsyncStorage.getItem(workspaceKey);
   if (existing) return { providers, workspace: JSON.parse(existing) as Workspace };

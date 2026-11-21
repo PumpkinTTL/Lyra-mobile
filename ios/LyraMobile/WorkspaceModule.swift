@@ -1,4 +1,5 @@
 import Foundation
+import PDFKit
 import QuickLook
 import React
 import UIKit
@@ -322,14 +323,14 @@ final class WorkspaceModule: NSObject, UIDocumentPickerDelegate, QLPreviewContro
     resolve(nil)
   }
 
-  private func presentFile(_ id: String, _ path: String, _ resolve: @escaping RCTPromiseResolveBlock, _ reject: @escaping RCTPromiseRejectBlock, _ action: @escaping (UIViewController, URL) -> Void) {
+  private func presentFile(_ id: String, _ path: String, _ resolve: @escaping RCTPromiseResolveBlock, _ reject: @escaping RCTPromiseRejectBlock, _ action: @escaping (UIViewController, URL) throws -> Void) {
     worker.async {
       do {
         let file = try self.existingFile(id, path)
         DispatchQueue.main.async {
           guard let host = RCTPresentedViewController() else { reject("LYRA_FILE", "请先打开 Lyra。", nil); return }
-          action(host, file)
-          resolve(nil)
+          do { try action(host, file); resolve(nil) }
+          catch { reject("LYRA_FILE", error.localizedDescription, error) }
         }
       } catch { reject("LYRA_FILE", error.localizedDescription, error) }
     }
@@ -346,11 +347,26 @@ final class WorkspaceModule: NSObject, UIDocumentPickerDelegate, QLPreviewContro
 
   @objc func openFile(_ id: String, path: String, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
     presentFile(id, path, resolve, reject) { host, url in
+      guard QLPreviewController.canPreview(url as NSURL) else { throw self.issue("系统预览不支持此文件。可以继续使用内置预览或另存文件。") }
       self.preview = url
       let controller = QLPreviewController()
       controller.dataSource = self
       controller.delegate = self
       host.present(controller, animated: true)
+    }
+  }
+
+  @objc func pdfPage(_ id: String, path: String, page index: Int, resolver resolve: @escaping RCTPromiseResolveBlock, rejecter reject: @escaping RCTPromiseRejectBlock) {
+    perform(resolve, reject) {
+      let url = try self.existingFile(id, path)
+      guard url.pathExtension.lowercased() == "pdf", let document = PDFDocument(url: url), !document.isLocked,
+            index >= 0, index < document.pageCount, let page = document.page(at: index) else { throw self.issue("无法读取此 PDF 页。") }
+      let size = page.bounds(for: .cropBox).size
+      guard size.width > 0, size.height > 0, size.width.isFinite, size.height.isFinite else { throw self.issue("PDF 页尺寸无效。") }
+      let scale = min(2.75, 1700 / max(size.width, size.height))
+      let image = page.thumbnail(of: CGSize(width: size.width * scale, height: size.height * scale), for: .cropBox)
+      guard let png = image.pngData() else { throw self.issue("无法渲染 PDF 页。") }
+      return ["count": document.pageCount, "base64": png.base64EncodedString()]
     }
   }
 

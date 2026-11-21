@@ -5,7 +5,7 @@ import { createLocalAgent, localUserMessage } from "./agent";
 import { prepareUserMessage } from "./chat-attachments";
 import { defaultProject, projectIO, workspaceSupported, type Project, type WorkspaceAttachment } from "./device-workspace";
 import { createWorkspaceTools } from "./workspace-tools";
-import { createSshTools } from "./ssh";
+import { createSshTools, type AuthorizeSsh } from "./ssh";
 import { toThreadMessages, toolFailed, type AgentPhase, type PartTiming, type ReplyTiming, type TimedAssistantMessage, type TimedToolResult, type ToolRun } from "./chat-messages";
 import { newConversation, orderedConversations, replaceConversation, userTitle, type Conversation, type Workspace } from "./conversations";
 import { resolveConnection, safeModelError, type ModelRef, type Provider } from "./model-catalog";
@@ -15,7 +15,8 @@ import { checkpointMessages, loadMessages, openStorage, removeMessages, saveMess
 type Snapshot = { workspace: Workspace; providers: Provider[] };
 type Runtime = ReturnType<typeof createLocalAgent>;
 type Session = { id: string; runtime: Runtime | null; transcript: AgentMessage[]; secret?: string; phase: AgentPhase;
-  tools: Record<string, ToolRun>; thinking: ReplyTiming; detach?: () => void; refresh?: boolean };
+  tools: Record<string, ToolRun>; thinking: ReplyTiming; detach?: () => void; refresh?: boolean;
+  processing?: PartTiming; beforeTurn?: AgentMessage; clock?: number };
 type ActiveRun = { owner: Session; controller: AbortController };
 
 function currentConversation(workspace: Workspace): Conversation {
@@ -24,7 +25,7 @@ function currentConversation(workspace: Workspace): Conversation {
   return current;
 }
 
-export function useLocalChat() {
+export function useLocalChat(authorizeSsh: AuthorizeSsh) {
   const data = useRef<Snapshot | null>(null);
   const session = useRef<Session | null>(null);
   const activeRun = useRef<ActiveRun | null>(null);
@@ -35,6 +36,7 @@ export function useLocalChat() {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [phase, setPhase] = useState<AgentPhase>("waiting");
   const [toolRuns, setToolRuns] = useState<Record<string, ToolRun>>({});
+  const [processing, setProcessing] = useState<PartTiming>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [retryCount, setRetryCount] = useState(0);
@@ -57,8 +59,10 @@ export function useLocalChat() {
     if (session.current !== owner) return;
     setPhase(owner.phase);
     setToolRuns(owner.tools);
+    setProcessing(streaming ? owner.processing : undefined);
     const state = owner.runtime?.agent.state;
-    setMessages(toThreadMessages(state?.messages ?? owner.transcript, state?.streamingMessage, streaming, owner.id, owner.secret, owner.thinking));
+    const liveMessage = streaming && !!state && (state.streamingMessage !== undefined || state.messages.at(-1) !== owner.beforeTurn);
+    setMessages(toThreadMessages(state?.messages ?? owner.transcript, state?.streamingMessage, liveMessage, owner.id, owner.secret, owner.thinking, owner.processing));
   }, []);
 
   const attach = useCallback((next: Snapshot, transcript: AgentMessage[]) => {
@@ -74,7 +78,7 @@ export function useLocalChat() {
     const connection = resolveConnection(next.providers, current.model);
     const projectId = current.projectId ?? defaultProject;
     const tools = workspaceSupported() ? createWorkspaceTools(projectIO(projectId), projectId) : [];
-    tools.push(...createSshTools());
+    tools.push(...createSshTools(authorizeSsh));
     const owner: Session = { id: current.id, runtime: null, transcript, secret: connection?.apiKey, phase: "waiting", tools: {}, thinking: {} };
     const runtime = connection
       ? createLocalAgent({
@@ -139,6 +143,16 @@ export function useLocalChat() {
           owner.tools = { ...owner.tools, [event.toolCallId]: { state, duration: event.durationMs, output } };
         } else if (event.type === "agent_end") {
           owner.tools = Object.fromEntries(Object.entries(owner.tools).map(([id, run]) => [id, run.state === "running" ? { ...run, state: "cancelled" } : run]));
+          const startedAt = owner.processing?.startedAt;
+          const clock = owner.clock;
+          if (startedAt !== undefined && clock !== undefined) {
+            const timing = { startedAt, completedAt: startedAt + Math.max(0, performance.now() - clock) };
+            for (let index = event.messages.length - 1; index >= 0; index--) {
+              const message = event.messages[index];
+              if (message === owner.beforeTurn || message.role === "user") break;
+              if (message.role === "assistant") { (message as TimedAssistantMessage).lyraTurn = timing; break; }
+            }
+          }
         }
         const { messages: finalized, streamingMessage } = runtime.agent.state;
         publish(owner, event.type !== "agent_end");
@@ -158,7 +172,7 @@ export function useLocalChat() {
     }
     updateSnapshot(next);
     publish(owner, false);
-  }, [publish, updateSnapshot]);
+  }, [authorizeSsh, publish, updateSnapshot]);
 
   useEffect(() => {
     let mounted = true;
@@ -208,6 +222,9 @@ export function useLocalChat() {
     activeRun.current = { owner, controller };
     setRunningId(owner.id);
     owner.phase = initialPhase;
+    owner.beforeTurn = active.agent.state.messages.at(-1);
+    owner.clock = performance.now();
+    owner.processing = { startedAt: Date.now() };
     publish(owner, true);
     setError("");
     let prepared = false;
@@ -236,6 +253,9 @@ export function useLocalChat() {
       return prepared;
     } finally {
       activeRun.current = null;
+      owner.processing = undefined;
+      owner.beforeTurn = undefined;
+      owner.clock = undefined;
       if (session.current !== owner) owner.detach?.();
       else if (owner.refresh && data.current) attach(data.current, active.agent.state.messages);
       else publish(owner, false);
@@ -427,7 +447,7 @@ export function useLocalChat() {
     providers,
     conversations: snapshot ? orderedConversations(snapshot.workspace.conversations) : [],
     messages, running: runningId !== null && runningId === current?.id, runningElsewhere: runningId !== null && runningId !== current?.id,
-    runningId, busy, error, phase, toolRuns,
+    runningId, busy, error, phase, toolRuns, processing,
     send, regenerate, continueReply, steer, stop, retry: () => setRetryCount((count) => count + 1),
     startChat, openChat, renameChat, deleteChat, chooseModel, chooseProject, chooseThinking, updateProvider, deleteProvider,
   };

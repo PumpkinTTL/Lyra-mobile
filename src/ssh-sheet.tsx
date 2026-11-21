@@ -1,121 +1,114 @@
-import { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { ArrowLeft, ChevronRight, Plus, Server, Trash2, X } from "lucide-react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Keyboard, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type TextInputProps } from "react-native";
+import { X } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { safeModelError } from "./model-catalog";
-import { deleteSshProfile, loadSshProfiles, saveSshProfile, testSsh, type SavedSshProfile, type SshProfile } from "./ssh";
+import { normalizeSshProfile, type AuthorizeSsh, type SshCommand, type SshProfile } from "./ssh";
 import { colors } from "./theme";
 
-const initial: SshProfile = { host: "", port: 22, username: "", fingerprint: "", auth: { type: "password", password: "" } };
+type Approval = { id: number; command: SshCommand; respond(profile?: SshProfile): void };
 
-export function SshSheet({ onClose }: { onClose: () => void }) {
-  const [profiles, setProfiles] = useState<SavedSshProfile[]>([]);
-  const [profile, setProfile] = useState<SshProfile>();
-  const [port, setPort] = useState("22");
-  const [task, setTask] = useState<"load" | "save" | "test" | "delete" | null>("load");
-  const [notice, setNotice] = useState("");
+export function useSshApproval() {
+  const [approval, setApproval] = useState<Approval>();
+  const pending = useRef<Approval>(undefined);
+  const nextId = useRef(0);
+  useEffect(() => () => pending.current?.respond(), []);
+
+  const authorize: AuthorizeSsh = useCallback((command, signal) => new Promise((resolve) => {
+    if (signal.aborted || pending.current) { resolve(undefined); return; }
+    const id = ++nextId.current;
+    const cancel = () => respond();
+    function respond(profile?: SshProfile) {
+      if (pending.current?.id !== id) return;
+      pending.current = undefined;
+      signal.removeEventListener("abort", cancel);
+      setApproval(undefined);
+      resolve(profile);
+    }
+    const request = { id, command, respond };
+    pending.current = request;
+    signal.addEventListener("abort", cancel, { once: true });
+    setApproval(request);
+  }), []);
+
+  return { approval, authorize };
+}
+
+function Field({ label, style, ...props }: TextInputProps & { label: string }) {
+  return <View style={styles.field}>
+    <Text style={styles.label}>{label}</Text>
+    <TextInput accessibilityLabel={label} autoCapitalize="none" autoCorrect={false} autoComplete="off"
+      importantForAutofill="no" style={[styles.input, style]} {...props} />
+  </View>;
+}
+
+export function SshSheet({ approval }: { approval: Approval }) {
+  const { command, respond } = approval;
+  const [host, setHost] = useState(command.host);
+  const [port, setPort] = useState(String(command.port));
+  const [username, setUsername] = useState(command.username);
+  const [fingerprint, setFingerprint] = useState("");
+  const [authType, setAuthType] = useState<SshProfile["auth"]["type"]>("password");
+  const [secret, setSecret] = useState("");
+  const [passphrase, setPassphrase] = useState("");
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    let live = true;
-    loadSshProfiles().then((saved) => {
-      if (live) setProfiles(saved);
-    }).catch((cause) => { if (live) setError(safeModelError(cause)); })
-      .finally(() => { if (live) setTask(null); });
-    return () => { live = false; };
-  }, []);
+  function close() {
+    Keyboard.dismiss();
+    respond();
+  }
 
-  async function perform(action: "save" | "test") {
-    if (task || !profile) return;
-    setNotice(""); setError(""); setTask(action);
+  function confirm() {
     try {
-      const value = { ...profile, port: Number(port) };
-      if (action === "test") { await testSsh(value); setNotice("指纹校验和登录成功。"); }
-      else {
-        setProfiles(await saveSshProfile(value));
-        setProfile(undefined);
-      }
+      const profile = normalizeSshProfile({ host, port: Number(port), username, fingerprint,
+        auth: authType === "password" ? { type: "password", password: secret }
+          : { type: "privateKey", privateKey: secret.trim(), passphrase: passphrase || undefined } });
+      Keyboard.dismiss();
+      respond(profile);
     } catch (cause) { setError(safeModelError(cause)); }
-    finally { setTask(null); }
-  }
-
-  function edit(next: SshProfile) {
-    setError(""); setNotice(""); setProfile(next); setPort(String(next.port));
-  }
-
-  function back() {
-    if (task) return;
-    if (profile) { setNotice(""); setError(""); setProfile(undefined); }
-    else onClose();
-  }
-
-  function remove(id: string) {
-    Alert.alert("移除 SSH 连接？", "将从本机钥匙串删除这组连接凭据。", [{ text: "取消", style: "cancel" }, {
-      text: "移除", style: "destructive", onPress: () => {
-        setTask("delete");
-        void deleteSshProfile(id).then((next) => { setProfiles(next); setProfile(undefined); }).catch((cause) => setError(safeModelError(cause))).finally(() => setTask(null));
-      },
-    }]);
-  }
-
-  function field(label: string, value: string, onChangeText: (text: string) => void, secret = false, multiline = false) {
-    return <View style={styles.field}>
-      <Text style={styles.label}>{label}</Text>
-      <TextInput accessibilityLabel={label} editable={!task} value={value} onChangeText={onChangeText} autoCapitalize="none"
-        autoCorrect={false} secureTextEntry={secret} multiline={multiline} style={[styles.input, multiline && styles.multiline]} />
-    </View>;
   }
 
   return (
-    <Modal animationType="slide" statusBarTranslucent navigationBarTranslucent onRequestClose={back}>
+    <Modal animationType="slide" statusBarTranslucent navigationBarTranslucent onRequestClose={close}>
       <SafeAreaView style={styles.screen}>
         <KeyboardAvoidingView behavior="padding" style={styles.screen}>
           <View style={styles.header}>
-            <Pressable accessibilityRole="button" accessibilityLabel={profile ? "返回 SSH 连接" : "关闭 SSH 设置"} disabled={!!task} style={styles.icon} onPress={back}>
-              {profile ? <ArrowLeft size={21} color={colors.text} /> : <X size={21} color={colors.text} />}
+            <Pressable accessibilityRole="button" accessibilityLabel="取消 SSH 请求" style={styles.icon} onPress={close}>
+              <X size={21} color={colors.text} />
             </Pressable>
-            <Text style={styles.title}>{profile ? profile.id ? "编辑 SSH 连接" : "添加 SSH 连接" : "SSH 连接"}</Text>
-            {profile?.id ? <Pressable accessibilityRole="button" accessibilityLabel="移除 SSH 连接" style={styles.icon} disabled={!!task} onPress={() => remove(profile.id!)}><Trash2 size={18} color={colors.error} /></Pressable> : <View style={styles.icon} />}
+            <Text style={styles.title}>确认 SSH 命令</Text>
+            <View style={styles.icon} />
           </View>
-          <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-            {!profile ? <>
-              <Text style={styles.hint}>添加连接后，在任意对话里说出服务器名称和要做的事。Agent 会拟定命令供你确认。</Text>
-              {profiles.map((entry) => <Pressable accessibilityRole="button" key={entry.id} disabled={!!task} onPress={() => edit(entry)} style={styles.connection}>
-                <Server size={18} color={colors.secondary} /><View style={styles.grow}><Text style={styles.label}>{entry.label}</Text>
-                  <Text style={styles.hint}>{entry.username}@{entry.host}:{entry.port}</Text></View><ChevronRight size={16} color={colors.secondary} />
-              </Pressable>)}
-              <Pressable accessibilityRole="button" disabled={!!task} onPress={() => edit(initial)} style={[styles.button, styles.connection]}>
-                <Plus size={17} color={colors.text} /><Text style={styles.label}>添加 SSH 连接</Text>
-              </Pressable>
-            </> : <>
-            {field("连接名称", profile.label ?? "", (label) => setProfile({ ...profile, label }))}
-            {field("服务器地址", profile.host, (host) => setProfile({ ...profile, host }))}
-            {field("端口", port, setPort)}
-            {field("SSH 用户名", profile.username, (username) => setProfile({ ...profile, username }))}
-            {field("SHA256 主机指纹", profile.fingerprint, (fingerprint) => setProfile({ ...profile, fingerprint }))}
+          <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.content}>
+            <View style={styles.field}>
+              <Text style={styles.label}>即将执行</Text>
+              <Text selectable style={styles.command}>{command.command}</Text>
+              <Text style={styles.hint}>凭据只用于这次执行，连接结束后清除。</Text>
+            </View>
+            <View style={styles.address}>
+              <View style={styles.grow}><Field label="服务器地址" value={host} onChangeText={setHost} /></View>
+              <View style={styles.port}><Field label="端口" value={port} onChangeText={setPort} keyboardType="number-pad" /></View>
+            </View>
+            <Field label="SSH 用户名" value={username} onChangeText={setUsername} />
+            <Field label="SHA256 主机指纹" value={fingerprint} onChangeText={setFingerprint} />
             <View style={styles.actions}>
               {(["password", "privateKey"] as const).map((type) => (
-                <Pressable key={type} accessibilityRole="radio" accessibilityState={{ checked: profile.auth.type === type }} disabled={!!task}
-                  onPress={() => setProfile({ ...profile, auth: type === "password" ? { type, password: "" } : { type, privateKey: "" } })}
-                  style={[styles.button, profile.auth.type === type && styles.selected]}><Text style={styles.label}>{type === "password" ? "密码" : "私钥"}</Text></Pressable>
+                <Pressable key={type} accessibilityRole="radio" accessibilityState={{ checked: authType === type }}
+                  onPress={() => { if (authType !== type) { setAuthType(type); setSecret(""); setPassphrase(""); } }}
+                  style={[styles.button, authType === type && styles.selected]}>
+                  <Text style={styles.label}>{type === "password" ? "密码" : "私钥"}</Text>
+                </Pressable>
               ))}
             </View>
-            {profile.auth.type === "password"
-              ? field("密码", profile.auth.password, (password) => setProfile({ ...profile, auth: { type: "password", password } }), true)
+            {authType === "password" ? <Field key={authType} label="密码" value={secret} onChangeText={setSecret} secureTextEntry />
               : <>
-                {field("私钥", profile.auth.privateKey, (privateKey) => setProfile({ ...profile, auth: { ...profile.auth, type: "privateKey", privateKey } }), false, true)}
-                {field("私钥口令（可空）", profile.auth.passphrase ?? "", (passphrase) => {
-                  if (profile.auth.type === "privateKey") setProfile({ ...profile, auth: { ...profile.auth, passphrase: passphrase || undefined } });
-                }, true)}
+                <Field key={authType} label="私钥" value={secret} onChangeText={setSecret} multiline style={styles.multiline} />
+                <Field label="私钥口令（可空）" value={passphrase} onChangeText={setPassphrase} secureTextEntry />
               </>}
-            <View style={styles.actions}>
-              <Pressable accessibilityRole="button" disabled={!!task} onPress={() => void perform("test")} style={styles.button}><Text style={styles.label}>测试连接</Text></Pressable>
-              <Pressable accessibilityRole="button" disabled={!!task} onPress={() => void perform("save")} style={[styles.button, styles.primary]}><Text style={styles.primaryText}>保存</Text></Pressable>
-            </View>
-            </>}
-            {task ? <ActivityIndicator color={colors.secondary} /> : null}
-            {notice ? <Text style={styles.label}>{notice}</Text> : null}
             {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+            <Pressable accessibilityRole="button" onPress={confirm} style={[styles.button, styles.primary]}>
+              <Text style={styles.primaryText}>确认并执行</Text>
+            </Pressable>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -125,21 +118,24 @@ export function SshSheet({ onClose }: { onClose: () => void }) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.background },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 56, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 52, paddingHorizontal: 12 },
   icon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   title: { color: colors.text, fontWeight: "600", fontSize: 16 },
-  content: { alignSelf: "center", width: "100%", maxWidth: 600, padding: 18, gap: 14 },
+  content: { alignSelf: "center", width: "100%", maxWidth: 560, paddingHorizontal: 20, paddingVertical: 12, gap: 16 },
   field: { gap: 5 },
-  label: { color: colors.text, fontSize: 15 },
+  label: { color: colors.text, fontSize: 14, fontWeight: "500" },
   input: { minHeight: 44, borderWidth: 1, borderColor: colors.border, borderRadius: 10, paddingHorizontal: 11, color: colors.text, fontSize: 15 },
-  multiline: { minHeight: 100, maxHeight: 190, textAlignVertical: "top", fontFamily: "monospace" },
-  connection: { flexDirection: "row", alignItems: "center", justifyContent: "flex-start", padding: 12, gap: 12, minHeight: 50, borderWidth: 1, borderColor: colors.border, borderRadius: 10 },
+  multiline: { minHeight: 90, maxHeight: 155, textAlignVertical: "top", fontFamily: "monospace" },
   hint: { color: colors.secondary, fontSize: 13, lineHeight: 20 },
+  command: { color: colors.text, fontSize: 14, lineHeight: 22, fontFamily: "monospace", paddingVertical: 4 },
+  address: { flexDirection: "row", alignItems: "center", gap: 10 },
   grow: { flex: 1 },
-  actions: { flexDirection: "row", alignItems: "center", gap: 8 },
-  button: { minHeight: 44, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, borderRadius: 10, justifyContent: "center" },
-  selected: { backgroundColor: colors.tint },
-  primary: { backgroundColor: colors.accent },
-  primaryText: { color: colors.accentInk, fontSize: 15, fontWeight: "500" },
+  port: { width: 76 },
+  actions: { flexDirection: "row", gap: 8 },
+  button: { minHeight: 44, paddingHorizontal: 15, borderRadius: 10, justifyContent: "center", alignItems: "center" },
+  selected: { backgroundColor: colors.raised },
+  primary: { alignSelf: "flex-start", backgroundColor: colors.accent },
+  primaryText: { color: colors.accentInk, fontSize: 14, fontWeight: "600" },
   error: { color: colors.error, fontSize: 14 },
 });
+

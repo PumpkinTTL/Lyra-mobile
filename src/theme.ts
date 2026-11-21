@@ -1,3 +1,6 @@
+import { useEffect, useState } from "react";
+import { AccessibilityInfo } from "react-native";
+
 // sRGB equivalents of the assistant-ui React Native starter's light tokens.
 const nativeTokens = {
   background: "#ffffff",
@@ -25,3 +28,14 @@ export const colors = {
   error: nativeTokens.destructive,
   overlay: "rgba(0, 0, 0, 0.35)",
 };
+export function useMotion() {
+  const [motion, setMotion] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    let changed = false;
+    const subscription = AccessibilityInfo.addEventListener("reduceMotionChanged", (reduced) => { changed = true; setMotion(!reduced); });
+    void AccessibilityInfo.isReduceMotionEnabled().then((reduced) => { if (mounted && !changed) setMotion(!reduced); }, () => {});
+    return () => { mounted = false; subscription.remove(); };
+  }, []);
+  return motion;
+}

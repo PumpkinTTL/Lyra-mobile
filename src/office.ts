@@ -10,9 +10,9 @@ export type Slide = { title: string; bullets: string[]; notes?: string; table?: 
 export type Sheet = { name: string; rows: (Cell | Formula)[][]; header?: boolean };
 export type OfficeData = { title: string; paragraphs?: string[]; blocks?: WordBlock[]; sheets?: Sheet[]; slides?: Slide[] };
 export type OfficeEdits = { replacements?: { oldText: string; newText: string }[]; cells?: { sheet?: string; cell: string; value: Cell | Formula }[] };
-export type OfficeSection = { title: string; lines: string[]; rows?: string[][] };
+export type OfficeSection = { title: string; lines: string[]; rows?: string[][]; rowNumbers?: number[]; rowCount?: number; columnCount?: number };
 export type OfficeKind = "docx" | "xlsx" | "pptx";
-type OfficeWindow = { section?: string; offset?: number; limit?: number; firstColumn?: number; columns?: number; formulas?: boolean };
+type OfficeWindow = { section?: string; offset?: number; limit?: number; firstColumn?: number; columns?: number; formulas?: boolean; rowIndex?: number; titlesOnly?: boolean };
 
 export function officeKind(path: string): OfficeKind | undefined {
   const extension = path.toLowerCase().split(".").pop();
@@ -235,19 +235,24 @@ export function readOffice(kind: OfficeKind, bytes: Uint8Array, sectionLimit = 2
   const firstColumn = Math.max(0, (window.firstColumn ?? 1) - 1);
   const columnCount = window.columns ?? 30;
   return selected.map(({ path, name }, index) => {
+    const title = name || `工作表 ${index + 1}`;
+    if (window.titlesOnly) return { title, lines: [] };
     const limit = window.limit ?? 100;
     const sheetRows = Array.from(parse(path).getElementsByTagNameNS("*", "row"));
-    const range = window.offset === undefined ? sheetRows.slice(0, limit) : sheetRows.filter((row) => {
+    const rowIndex = window.rowIndex ?? 0;
+    const range = window.offset === undefined ? sheetRows.slice(rowIndex, rowIndex + limit) : sheetRows.filter((row) => {
       const rowNumber = Number(row.getAttribute("r"));
       return rowNumber > start && rowNumber <= start + limit;
     }).slice(0, limit);
     const rowNumbers: number[] = [];
-    const rows = range.map((row) => {
-      rowNumbers.push(Number(row.getAttribute("r")));
+    let usedColumns = 0;
+    const rows = range.map((row, index) => {
+      rowNumbers.push(Number(row.getAttribute("r")) || rowIndex + index + 1);
       const cells: string[] = [];
       for (const cell of Array.from(row.getElementsByTagNameNS("*", "c"))) {
         const column = /^[A-Z]+/.exec(cell.getAttribute("r") ?? "")?.[0];
         const absolute = column ? [...column].reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1 : cells.length;
+        usedColumns = Math.max(usedColumns, Math.min(absolute + 1, 16_384));
         const position = absolute - firstColumn;
         if (position < 0 || position >= columnCount) continue;
         const value = cell.getElementsByTagNameNS("*", "v")[0]?.textContent ?? "";
@@ -259,7 +264,8 @@ export function readOffice(kind: OfficeKind, bytes: Uint8Array, sectionLimit = 2
       }
       return Array.from(cells, (value) => value ?? "");
     });
-    return { title: name || `工作表 ${index + 1}`, lines: rows.map((row, i) => (window.offset !== undefined ? `${rowNumbers[i]}\t` : "") + row.join("\t")), rows };
+    return { title, lines: rows.map((row, i) => (window.offset !== undefined ? `${rowNumbers[i]}\t` : "") + row.join("\t")),
+      rows, rowNumbers, rowCount: sheetRows.length, columnCount: usedColumns };
   });
 }
 

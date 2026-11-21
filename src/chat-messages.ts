@@ -9,7 +9,7 @@ export type AgentPhase = "preparing" | "waiting" | "thinking" | "tool" | "writin
 export type ToolRun = { state: "running" | "done" | "error" | "cancelled"; output?: string; duration?: number };
 export type PartTiming = { startedAt: number; completedAt?: number };
 export type ReplyTiming = Record<number, PartTiming>;
-export type TimedAssistantMessage = AssistantMessage & { lyraThinking?: ReplyTiming };
+export type TimedAssistantMessage = AssistantMessage & { lyraThinking?: ReplyTiming; lyraTurn?: PartTiming };
 export type TimedToolResult = ToolResultMessage & { lyraTiming?: PartTiming };
 
 const producingTools = new Set(["write", "edit", "bash", "office_create", "office_edit", "archive_create", "artifact_show"]);
@@ -43,8 +43,11 @@ export function toThreadMessages(
   conversationId = "",
   apiKey = "",
   liveThinking?: ReplyTiming,
+  liveTurn?: PartTiming,
 ): ThreadMessageLike[] {
   const all = partial ? [...messages, partial] : messages;
+  let lastUserIndex = all.length - 1;
+  while (lastUserIndex >= 0 && all[lastUserIndex].role !== "user") lastUserIndex--;
   const results = new Map(
     all.flatMap((message) => message.role === "toolResult" ? [[message.toolCallId, message] as const] : []),
   );
@@ -91,16 +94,19 @@ export function toThreadMessages(
           ...(result ? {
             result: images.length || artifacts.length ? { text, images, artifacts } : text,
             isError: toolFailed(result.isError, result.details),
-          } : !busy ? { result: { text: "工具没有完成。", cancelled: true } } : {}),
+          } : !busy || index < lastUserIndex || message.stopReason === "aborted" || message.stopReason === "error"
+            ? { result: { text: "工具没有完成。", cancelled: true } } : {}),
         });
       }
     }
-    if (!content.length && !message.errorMessage && message.stopReason !== "length" && message !== partial) return [];
+    const turn = (message as TimedAssistantMessage).lyraTurn;
+    if (!content.length && !message.errorMessage && !turn && message.stopReason !== "length" && message.stopReason !== "aborted" && message !== partial) return [];
     return [{
       id,
       role: "assistant",
       createdAt,
       content,
+      ...(turn ? { metadata: { custom: { lyraTurn: turn } } } : {}),
       status: message.stopReason === "aborted"
         ? { type: "incomplete", reason: "cancelled" }
         : message.errorMessage
@@ -118,14 +124,16 @@ export function toThreadMessages(
     const previous = turns.at(-1);
     if (row.role === "assistant" && previous?.role === "assistant" && previous.status?.type !== "incomplete"
       && typeof previous.content !== "string" && typeof row.content !== "string") {
-      turns[turns.length - 1] = { ...previous, content: [...previous.content, ...row.content], status: row.status };
+      turns[turns.length - 1] = { ...previous, content: [...previous.content, ...row.content], status: row.status, metadata: row.metadata ?? previous.metadata };
     } else {
       turns.push(row);
     }
   }
   const last = turns.at(-1);
   if (busy && last?.role === "assistant" && last.status?.type !== "incomplete") {
-    turns[turns.length - 1] = { ...last, status: { type: "running" } };
+    turns[turns.length - 1] = { ...last, status: { type: "running" }, ...(liveTurn ? { metadata: { custom: { lyraTurn: liveTurn } } } : {}) };
+  } else if (busy && liveTurn && last?.role === "user") {
+    turns.push({ id: `${conversationId}:${all.length}`, role: "assistant", content: [], status: { type: "running" }, metadata: { custom: { lyraTurn: liveTurn } } });
   }
   return turns;
 }

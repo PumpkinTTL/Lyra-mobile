@@ -15,12 +15,13 @@ const { outputFiles } = await build({
       plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native|react-native-keychain|react-native-fetch-api|@osuki-dev\/react-native-ssh)$/ }, (args) =>
         ({ path: args.path, namespace: "test" }));
       plugin.onLoad({ filter: /.*/, namespace: "test" }, ({ path }) => {
-        if (path === "react-native") return { contents: "export const NativeModules = {}; export const Alert = {alert: (...args) => globalThis.lyraTestApproval(...args)}; export const Networking = new Proxy({}, { get: (_, name) => (...args) => globalThis.lyraTestNative[name](...args) });" };
+        if (path === "react-native") return { contents: "export const NativeModules = {}; export const Networking = new Proxy({}, { get: (_, name) => (...args) => globalThis.lyraTestNative[name](...args) });" };
         if (path.endsWith("async-storage")) return { contents: "export default globalThis.lyraTestStorage;" };
         if (path.endsWith("react-native-ssh")) return { contents: "export const connect = (...args) => globalThis.lyraTestConnect(...args);" };
         if (path === "react-native-keychain") return { contents: [
           "export const getGenericPassword = () => globalThis.lyraTestPassword;",
           "export const setGenericPassword = (_user, password) => { globalThis.lyraTestPassword = { password }; return true; };",
+          "export const resetGenericPassword = async ({ service }) => globalThis.lyraTestReset(service);",
         ].join("\n") };
         return { contents: "export const Response = globalThis.Response;" };
       });
@@ -33,7 +34,10 @@ function load(name) {
   return import("data:text/javascript;base64," + Buffer.from(output.contents).toString("base64"));
 }
 
-const { effectiveThinking, fetchProviderCatalog, normalizeProvider, resolveConnection } = await load("model-catalog.js");
+const { effectiveThinking, fetchProviderCatalog, modelNickname, normalizeProvider, resolveConnection } = await load("model-catalog.js");
+assert.equal(modelNickname("zocde/GLM-5.3-Flas-trial"), "GLM-5.3-Flas-trial");
+assert.equal(modelNickname("commandcode/deepseek/deepseek-v4.1-flash"), "deepseek-v4.1-flash");
+assert.equal(modelNickname("model-a"), "model-a");
 const fetchProviderModels = async (...args) => (await fetchProviderCatalog(...args)).map(({ id }) => id);
 const { createLocalAgent, testModelConnection } = await load("agent.js");
 const provider = { id: "test", name: "  上游模型  ", protocol: "openai", endpoint: "https://example.invalid/v1/chat/completions", apiKey: "test-key", models: [" model-a ", "model-a", ""] };
@@ -208,24 +212,18 @@ assert.match(interrupted.errorMessage, /连接中断/);
 assert.ok(interrupted.content.some((part) => part.type === "text" && part.text === "部分回复"));
 
 const ssh = await load("ssh.js");
-const sshTools = ssh.createSshTools();
-assert.deepEqual(sshTools.map(({ name }) => name), ["ssh_servers", "ssh_exec"]);
-await assert.rejects(sshTools[1].execute("request", { server: "missing", command: "printf fixture" }), /添加服务器和凭据/);
-const credentials = { host: "server.local", port: 22, username: "local", fingerprint: "SHA256:" + "A".repeat(43), auth: { type: "password", password: "fixture-secret" } };
-globalThis.lyraTestPassword = { password: JSON.stringify(credentials) };
-assert.equal((await ssh.loadSshProfiles())[0].label, "server.local");
-await ssh.saveSshProfile({ ...credentials, label: "Staging", host: "staging.local" });
-assert.equal((await ssh.loadSshProfiles()).length, 2);
-const visibleServers = (await sshTools[0].execute("discover", {})).content[0].text;
-assert.match(visibleServers, /Staging: staging.local:22/);
-assert.doesNotMatch(visibleServers, /fixture-secret|SHA256:/);
-await assert.rejects(sshTools[1].execute("needs-target", { command: "printf fixture" }), /唯一的连接名称/);
 const command = "printf fixture";
-globalThis.lyraTestApproval = (_title, details, buttons) => {
-  assert.match(details, /staging\.local/);
-  assert.ok(details.endsWith(command));
-  buttons.find(({ text }) => text === "执行").onPress();
-};
+const target = { host: "staging.local", port: 22, username: "local" };
+const credentials = { ...target, fingerprint: "SHA256:" + "A".repeat(43), auth: { type: "password", password: "fixture-secret" } };
+const [declined] = ssh.createSshTools(async () => undefined);
+await assert.rejects(declined.execute("denied", { ...target, command }), /未批准/);
+const [sshTool] = ssh.createSshTools(async (request, signal) => {
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(request, { ...target, command });
+  return credentials;
+});
+assert.equal(sshTool.name, "ssh_exec");
+assert.equal(sshTool.replay, "never");
 globalThis.lyraTestConnect = async ({ host, verifyHostKey }) => {
   assert.equal(host, "staging.local");
   assert.equal(verifyHostKey({ fingerprint: credentials.fingerprint }), true);
@@ -239,8 +237,9 @@ globalThis.lyraTestConnect = async ({ host, verifyHostKey }) => {
     async disconnect() {},
   };
 };
-assert.match((await sshTools[1].execute("named", { server: "Staging", command })).content[0].text, /^fixture\n退出码 0$/);
-delete globalThis.lyraTestApproval;
+const sshResult = await sshTool.execute("approved", { ...target, command });
+assert.match(sshResult.content[0].text, /^fixture\n退出码 0$/);
+assert.doesNotMatch(JSON.stringify(sshResult), /fixture-secret|SHA256:/);
 delete globalThis.lyraTestConnect;
 delete globalThis.lyraTestPassword;
 
@@ -256,8 +255,11 @@ globalThis.lyraTestStorage = {
   multiSet: async (values) => { for (const [key, value] of values) records.set(key, value); },
 };
 globalThis.lyraTestPassword = { password: JSON.stringify({ endpoint: openai.endpoint, apiKey: "test-key", model: "model-a" }) };
+const cleaned = [];
+globalThis.lyraTestReset = (service) => { cleaned.push(service); return true; };
 const { openStorage, loadMessages, saveProviders } = await load("storage.js");
 const migrated = await openStorage();
+assert.deepEqual(cleaned, ["com.lyramobile.ssh"]);
 assert.equal(migrated.providers[0].apiKey, "test-key");
 assert.equal(migrated.workspace.conversations.length, 2);
 assert.equal(migrated.workspace.conversations.find((conversation) => conversation.id === migrated.workspace.activeId).title, "旧对话");
@@ -266,4 +268,4 @@ assert.deepEqual((await openStorage()).workspace, migrated.workspace);
 await saveProviders([openai, anthropic]);
 assert.equal((await openStorage()).providers.length, 2);
 assert.ok(!records.get("lyra.workspace.v2").includes("test-key"));
-console.log("Provider catalogs, three streaming protocol probes, Android fetch adaptation, and 0.1 data migration passed.");
+console.log("Provider catalogs, model labels, streaming protocols, temporary SSH approval, and data migration passed.");

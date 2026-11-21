@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { ArrowLeft, Brain, Check, ChevronRight, Cpu, FolderOpen, Plus, Search, Server, Terminal, Trash2, X } from "lucide-react-native";
+import { ArrowLeft, Brain, Check, ChevronRight, Cpu, FolderOpen, Plus, Search, Server, Trash2, X } from "lucide-react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type ModelRef, type Provider, effectiveThinking, modelOptions, protocols, providerRef, reasoningChoices, safeModelError, sameModel, thinkingLabels } from "./model-catalog";
@@ -18,14 +18,13 @@ type Props = {
   onSelect: (model: ModelRef) => Promise<void>;
   onThinking: (thinking: ThinkingLevel) => Promise<void>;
   onWorkspace: () => void;
-  onSsh: () => void;
   onSave: (provider: Provider, selected: ModelRef) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 };
 
 type Page = "settings" | "models" | "thinking" | "edit";
 
-export function ModelSheet({ initialPage, providers, current, thinking, projectName, running, onClose, onSelect, onThinking, onWorkspace, onSsh, onSave, onDelete }: Props) {
+export function ModelSheet({ initialPage, providers, current, thinking, projectName, running, onClose, onSelect, onThinking, onWorkspace, onSave, onDelete }: Props) {
   const { bottom } = useSafeAreaInsets();
   const [page, setPage] = useState<Page>(initialPage);
   const [backPage, setBackPage] = useState<"settings" | "models">(initialPage);
@@ -87,7 +86,7 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
       <Pressable key={model?.model ?? "none"} accessibilityRole="radio" accessibilityState={{ checked: selected, disabled: busy }}
         disabled={busy} onPress={() => { void apply(() => onSelect(model), onClose); }}
         style={({ pressed }) => [styles.option, (selected || pressed) && styles.selected]}>
-        <Text style={styles.optionLabel} numberOfLines={1}>{label}</Text>
+        <Text style={styles.optionLabel} numberOfLines={2}>{label}</Text>
         {selected ? <Check color={colors.text} size={17} /> : null}
       </Pressable>
     );
@@ -132,7 +131,6 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
                       [Cpu, "当前对话模型", activeLabel, () => setPage("models")],
                       [Brain, "思考级别", thinkLabel, () => setPage("thinking")],
                       [FolderOpen, "工作区", projectName, onWorkspace],
-                      [Terminal, "SSH 连接", "管理", onSsh],
                     ] as const).map(([Icon, label, value, onPress]) => (
                       <Pressable key={label} accessibilityRole="button" accessibilityLabel={label + "：" + value}
                         onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.selected]}>

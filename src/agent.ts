@@ -4,7 +4,7 @@ import { Agent, streamAnthropic, streamGoogle, streamOpenAI } from "./pi-runtime
 import { makeContextBudget } from "./context-budget";
 import { defaultContextWindow, effectiveThinking, safeModelError, thinkingLevels, type ModelConnection } from "./model-catalog";
 
-const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言，用工作区工具实际完成任务。路径相对于 /workspace。Office 附件使用 office_inspect 按段落、工作表范围或幻灯片读取，可编辑 Word、Excel 和 PowerPoint 用 office_create 生成，现有文档用 office_edit 修改。要求保留原稿时传 outputPath。普通文本和图片用 read，写文本用 edit 或 write。压缩使用 archive_create，交付现有文件使用 artifact_show。bash 是内置命令和管道的沙箱，不能启动外部 Node、Python 或系统程序。用户明确要求管理服务器时，用 ssh_servers 查找已配置的连接，自己拟定命令并通过 ssh_exec 完成任务。凭据在 SSH 设置中管理。说明实际做过的更改与验证。";
+const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言，用工作区工具实际完成任务。路径相对于 /workspace。Office 附件使用 office_inspect 按段落、工作表范围或幻灯片读取，可编辑 Word、Excel 和 PowerPoint 用 office_create 生成，现有文档用 office_edit 修改。要求保留原稿时传 outputPath。普通文本和图片用 read，写文本用 edit 或 write。压缩使用 archive_create，交付现有文件使用 artifact_show。bash 是内置命令和管道的沙箱，不能启动外部 Node、Python 或系统程序。用户明确要求管理服务器时，根据用户提供的目标地址拟定命令并调用 ssh_exec。连接凭据和命令确认由应用在本机临时收集，勿在聊天中索要密码或私钥。说明实际做过的更改与验证。";
 
 type Options = {
   settings: ModelConnection;

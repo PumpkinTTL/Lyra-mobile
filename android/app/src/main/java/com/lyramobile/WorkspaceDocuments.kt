@@ -122,8 +122,14 @@ internal class WorkspaceDocuments(private val resolver: ContentResolver, private
     private val columns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
       DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
 
-    fun mime(name: String): String =
-      MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
-        ?: "application/octet-stream"
+    fun mime(name: String): String {
+      val extension = name.substringAfterLast('.', "").lowercase()
+      return when (extension) {
+        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "application/octet-stream"
+      }
+    }
   }
 }

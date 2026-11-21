@@ -144,6 +144,20 @@ const firstThinking = { role: "assistant", timestamp: 100, content: [{ type: "th
 const nextThinking = { role: "assistant", timestamp: 200, content: [{ type: "thinking", thinking: "next" }], stopReason: "pending" };
 const thread = toThreadMessages([firstThinking], nextThinking, true, "test", "", { 0: { startedAt: 201 } });
 assert.deepEqual(thread[0].content.map(({ status }) => status.type), ["complete", "running"]);
+const turnTiming = { startedAt: 80, completedAt: 260 };
+const finishedTurn = toThreadMessages([firstThinking, { ...nextThinking, stopReason: "stop", lyraTurn: turnTiming }], undefined, false);
+assert.equal(finishedTurn.length, 1);
+assert.deepEqual(finishedTurn[0].metadata.custom.lyraTurn, turnTiming);
+const workingTurn = toThreadMessages([textOnly], undefined, true, "test", "", undefined, { startedAt: 201 });
+assert.equal(workingTurn.length, 2);
+assert.equal(workingTurn[1].status.type, "running");
+assert.deepEqual(workingTurn[1].metadata.custom.lyraTurn, { startedAt: 201 });
+const interruptedTool = { role: "assistant", timestamp: 100, stopReason: "aborted",
+  content: [{ type: "toolCall", id: "stopped-read", name: "read", arguments: { path: "result.txt" } }] };
+const [stoppedTurn, , nextTurn] = toThreadMessages([interruptedTool, textOnly], undefined, true, "test", "", undefined, { startedAt: 201 });
+assert.equal(stoppedTurn.content[0].result.cancelled, true);
+assert.equal(nextTurn.status.type, "running");
+assert.equal(toThreadMessages([{ ...interruptedTool, content: [] }], undefined, false)[0].status.reason, "cancelled");
 const links = (toolName, path) => ({ type: "tool-call", toolName, result: { artifacts: [{ projectId: "first", path }] } });
 assert.deepEqual(turnArtifacts([links("office_inspect", "source.docx"), links("office_create", "output.docx"), links("edit", "output.docx")]),
   [{ projectId: "first", path: "output.docx" }]);

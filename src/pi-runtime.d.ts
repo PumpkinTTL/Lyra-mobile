@@ -5,3 +5,4 @@ export { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthr
 export { streamSimple as streamGoogle } from "@earendil-works/pi-ai/api/google-generative-ai";
 export { Bash, InMemoryFs } from "just-bash/browser";
 export { default as PptxGenJS } from "pptxgenjs";
+export const officeViewerScript: string;

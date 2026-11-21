@@ -1,6 +1,7 @@
 package com.lyramobile
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -162,8 +163,10 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
         val activity = context.currentActivity ?: error("请先打开 Lyra。")
         activity.runOnUiThread {
           try {
-            activity.startActivity(Intent.createChooser(intent, if (share) "分享文件" else "选择打开方式"))
+            activity.startActivity(if (share) Intent.createChooser(intent, "分享文件") else intent)
             promise.resolve(null)
+          } catch (error: ActivityNotFoundException) {
+            promise.reject("LYRA_NO_VIEWER", "本机没有可打开此格式的应用。可以继续使用内置预览或另存文件。", error)
           } catch (error: Exception) { promise.reject("LYRA_FILE", error) }
         }
       } catch (error: Exception) { promise.reject("LYRA_FILE", error) }
@@ -207,7 +210,7 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
     renderer.use {
       require(page in 0 until it.pageCount) { "PDF 页码超出范围。" }
       it.openPage(page).use { frame ->
-        val scale = minOf(1.75, 1080.0 / maxOf(frame.width, frame.height))
+        val scale = minOf(2.75, 1700.0 / maxOf(frame.width, frame.height))
         val bitmap = Bitmap.createBitmap((frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         try {
           bitmap.eraseColor(Color.WHITE)
