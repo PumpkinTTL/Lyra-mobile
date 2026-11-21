@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdir as mkdirArtifact, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { build } from "esbuild";
+import { unzipSync } from "fflate";
 
 const { outputFiles } = await build({
   entryPoints: ["src/agent.ts", "src/chat-messages.ts", "src/workspace-tools.ts", "src/chat-attachments.ts"],
@@ -61,11 +64,11 @@ globalThis.lyraMockWorkspace = {
 };
 
 const { createLocalAgent } = await load("agent.js");
-const { toThreadMessages } = await load("chat-messages.js");
+const { toThreadMessages, toolFailed } = await load("chat-messages.js");
 const { createWorkspaceTools } = await load("workspace-tools.js");
 const { prepareUserMessage } = await load("chat-attachments.js");
 const tools = createWorkspaceTools(io);
-const expectedNames = ["read", "write", "edit", "ls", "find", "grep", "bash"];
+const expectedNames = ["read", "write", "edit", "ls", "find", "grep", "bash", "office_inspect", "office_create", "office_edit", "archive_create", "artifact_show"];
 assert.deepEqual(tools.map((tool) => tool.name), expectedNames);
 
 const run = (name, args) => tools.find((tool) => tool.name === name).execute("test", args);
@@ -84,6 +87,43 @@ assert.equal(text(entries.get("result.txt")), "updated\n");
 const zip = await run("bash", { command: "gzip -c result.txt > result.gz; gunzip -c result.gz" });
 assert.match(output(zip), /updated[\s\S]*退出码 0/);
 assert.ok(entries.has("result.gz"));
+const failedCommand = await run("bash", { command: "exit 7" });
+assert.equal(failedCommand.details.exitCode, 7);
+assert.equal(toolFailed(false, failedCommand.details), true);
+assert.equal(toolFailed(false, zip.details), false);
+
+const office = [
+  { path: "office/brief.docx", title: "移动端文档", blocks: [{ kind: "heading", text: "工作进度", level: 2 },
+    { kind: "paragraph", text: "原始段落" }, { kind: "bullet", text: "保留的第二段" }, { kind: "table", rows: [["任务", "状态"], ["交付", "完成"]] }] },
+  { path: "office/report.xlsx", title: "表格", sheets: [{ name: "进度", header: true, rows: [["已完成", "待办", "合计"], [2, 1, { formula: "SUM(A2:B2)", result: 3 }]] }] },
+  { path: "office/deck.pptx", title: "移动端演示", slides: [{ title: "开始", bullets: ["可编辑幻灯片"] }, { title: "第二页", bullets: ["保留其他内容"], table: [["项目", "完成"], ["工具", "已验证"]] }] },
+];
+for (const file of office) {
+  const result = await run("office_create", file);
+  assert.equal(result.details.artifacts[0].path, file.path);
+  const raw = Buffer.from(entries.get(file.path), "base64");
+  assert.equal(raw.subarray(0, 2).toString(), "PK");
+  assert.ok(unzipSync(raw)["[Content_Types].xml"]);
+}
+await run("office_edit", { path: office[0].path, replacements: [{ oldText: "原始段落", newText: "修改后的段落" }] });
+await run("office_edit", { path: office[1].path, cells: [{ sheet: "进度", cell: "A2", value: 3 }, { sheet: "进度", cell: "C3", value: "补充" }, { sheet: "进度", cell: "AD105", value: { formula: "SUM(A2:B2)", result: 4 } }] });
+await run("office_edit", { path: office[2].path, replacements: [{ oldText: "可编辑幻灯片", newText: "真正的 PowerPoint" }] });
+assert.match(output(await run("read", { path: office[0].path })), /修改后的段落[\s\S]*保留的第二段/);
+assert.match(output(await run("read", { path: office[1].path })), /3\t1[\s\S]*补充/);
+assert.match(output(await run("read", { path: office[2].path })), /真正的 PowerPoint[\s\S]*第二页/);
+assert.match(output(await run("office_inspect", { path: office[1].path, section: "进度", offset: 105, firstColumn: 30, limit: 1, columns: 1 })), /105\t=SUM\(A2:B2\) → 4/);
+assert.match(output(await run("office_inspect", { path: office[2].path, section: "2" })), /已验证/);
+const copied = await run("office_edit", { path: office[0].path, outputPath: "office/copy.docx", replacements: [{ oldText: "修改后的段落", newText: "副本修改" }] });
+assert.equal(copied.details.artifacts[0].path, "office/copy.docx");
+assert.match(output(await run("read", { path: office[0].path })), /修改后的段落/);
+assert.match(output(await run("read", { path: "office/copy.docx" })), /副本修改/);
+await run("archive_create", { path: "office/bundle.zip", files: office.map(({ path }) => path) });
+assert.deepEqual(Object.keys(unzipSync(Buffer.from(entries.get("office/bundle.zip"), "base64"))), office.map(({ path }) => path));
+if (process.env.LYRA_OFFICE_FIXTURES) {
+  const dir = process.env.LYRA_OFFICE_FIXTURES;
+  await mkdirArtifact(dir, { recursive: true });
+  for (const { path } of office) await writeFile(join(dir, path.split("/").pop()), Buffer.from(entries.get(path), "base64"));
+}
 
 await io.write(".attachments/project.txt", b64("attachment body"));
 await io.write(".attachments/test.png", b64("test image bytes"));
@@ -127,11 +167,16 @@ const agent = createLocalAgent({
   },
 });
 const events = [];
-agent.agent.subscribe((event) => { events.push(event.type === "message_update" ? event.assistantMessageEvent.type : event.type); });
+let executingStatus;
+agent.agent.subscribe((event) => {
+  events.push(event.type === "message_update" ? event.assistantMessageEvent.type : event.type);
+  if (event.type === "tool_execution_start") executingStatus = toThreadMessages(agent.agent.state.messages, undefined, true).at(-1).status.type;
+});
 await agent.send("Read result.txt");
 assert.equal(requests, 2);
 assert.ok(events.includes("thinking_delta"));
 assert.ok(events.includes("tool_execution_start") && events.includes("tool_execution_end"));
+assert.equal(executingStatus, "running");
 const agentMessages = agent.agent.state.messages;
 const transcript = toThreadMessages(agentMessages, undefined, false);
 const assistantTurns = transcript.filter((message) => message.role === "assistant");
@@ -143,6 +188,29 @@ assert.match(turn.content[2].text, /done with the file/);
 const streamingTurn = toThreadMessages(agentMessages.slice(0, -1), agentMessages.at(-1), true).at(-1);
 assert.equal(streamingTurn.id, turn.id);
 assert.equal(streamingTurn.status.type, "running");
+
+let summaries = 0;
+let compactedRequests = 0;
+const compaction = createLocalAgent({
+  settings: { ...settings, options: { contextWindow: 4096, maxTokens: 512 } }, tools,
+  messages: [{ role: "user", content: "早期原文。".repeat(1300), timestamp: 1 }],
+  async fetch(_input, init) {
+    const request = JSON.parse(init.body);
+    if (!(request.tools?.length)) summaries++;
+    else {
+      compactedRequests++;
+      assert.equal(request.tools.length, expectedNames.length);
+      assert.match(JSON.stringify(request.messages), /早期内容的摘要/);
+      assert.match(JSON.stringify(request.messages), /最新的问题/);
+      assert.ok(!JSON.stringify(request.messages).includes("早期原文。".repeat(1300)));
+    }
+    return stream(settings.model, false);
+  },
+});
+await compaction.send("最新的问题");
+assert.equal(summaries, 1);
+assert.equal(compactedRequests, 1);
+assert.ok(compaction.agent.state.messages.some((message) => message.role === "user" && message.content === "早期原文。".repeat(1300)));
 
 const cancelled = createLocalAgent({
   settings,
@@ -156,4 +224,4 @@ const active = cancelled.send("wait");
 cancelled.agent.abort();
 await active;
 assert.equal(cancelled.agent.state.isStreaming, false);
-console.log("Seven workspace tools, persisted Bash I/O and gzip, attachments, restored transcript tools, streamed reasoning/tool/text, and cancellation passed.");
+console.log("Workspace tools, Bash and gzip, editable Office and ZIP files, attachments, restored tools, streaming and cancellation passed.");

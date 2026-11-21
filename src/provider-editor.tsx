@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { Check, Download, FlaskConical, Plus, X } from "lucide-react-native";
 import { testModelConnection } from "./agent";
 import { localId } from "./conversations";
-import { fetchProviderModels, normalizeProvider, protocols, providerRef, safeModelError, type ModelRef, type Protocol, type Provider } from "./model-catalog";
+import { fetchProviderModels, normalizeProvider, protocols, providerRef, safeModelError, type ModelOptions, type ModelRef, type Protocol, type Provider } from "./model-catalog";
 import { streamingFetch } from "./model-fetch";
 import { colors } from "./theme";
 
@@ -26,6 +26,7 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(40);
   const [task, setTask] = useState<"list" | "test" | "save" | null>(null);
+  const [showModelOptions, setShowModelOptions] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const request = useRef<AbortController | null>(null);
@@ -96,7 +97,7 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
         setNotice(models.length ? "已拉取 " + models.length + " 个模型，点选即可添加。" : "供应商没有返回可用模型，可手动添加。");
       } else if (action === "test") {
         if (!selected) throw new Error("请先添加并选中要测试的模型。");
-        await testModelConnection({ ...verified, model: selected }, streamingFetch, abort.signal);
+        await testModelConnection({ ...verified, model: selected, options: verified.modelOptions?.[selected] }, streamingFetch, abort.signal);
         setNotice(selected + " 已成功返回回复。");
       } else {
         await onSave(verified, activate && selected ? providerRef(verified, selected) : null);
@@ -111,6 +112,11 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
       setTask(null);
       onBusy(false);
     }
+  }
+
+  function setModelOption<K extends keyof ModelOptions>(name: K, value: ModelOptions[K]) {
+    setDraft((old) => ({ ...old, modelOptions: { ...old.modelOptions, [activeModel]: { ...old.modelOptions?.[activeModel], [name]: value } } }));
+    setError("");
   }
 
   const results = upstream.filter((model) => model.toLowerCase().includes(query.trim().toLowerCase()));
@@ -168,6 +174,29 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
           </Pressable>
         </View>
       ))}
+      {activeModel ? <Pressable accessibilityRole="button" onPress={() => setShowModelOptions(!showModelOptions)} style={styles.secondary}>
+        <Text style={styles.secondaryText}>{showModelOptions ? "收起模型参数" : "配置选中模型的能力"}</Text>
+      </Pressable> : null}
+      {activeModel && showModelOptions ? (
+        <View style={styles.modelOptions}>
+          <Text style={styles.name}>{activeModel}</Text>
+          {([['contextWindow', '上下文窗口', '32768'], ['maxTokens', '输出上限', '4096']] as const).map(([key, title, placeholder]) => (
+            <View key={key} style={styles.actions}>
+              <Text style={[styles.label, styles.grow]}>{title}</Text>
+              <TextInput accessibilityLabel={title} inputMode="numeric" maxLength={7} placeholder={placeholder} placeholderTextColor={colors.secondary}
+                editable={!disabled} style={[styles.input, styles.optionNumber]} value={draft.modelOptions?.[activeModel]?.[key]?.toString() ?? ""}
+                onChangeText={(text) => setModelOption(key, text.replace(/\D/g, "") ? Number(text.replace(/\D/g, "")) : undefined)} />
+            </View>
+          ))}
+          {([['images', '支持图片'], ['reasoning', '支持推理']] as const).map(([key, title]) => (
+            <View key={key} style={styles.actions}>
+              <Text style={[styles.label, styles.grow]}>{title}</Text>
+              <Switch accessibilityLabel={title} value={draft.modelOptions?.[activeModel]?.[key] ?? true} disabled={disabled}
+                onValueChange={(value) => setModelOption(key, value)} />
+            </View>
+          ))}
+        </View>
+      ) : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       {notice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>{notice}</Text> : null}
       <View style={styles.actions}>
@@ -227,6 +256,8 @@ const styles = StyleSheet.create({
   icon: { alignItems: "center", justifyContent: "center", width: 44, height: 44 },
   model: { borderRadius: 12, borderWidth: 1, borderColor: colors.border, flexDirection: "row", alignItems: "center", backgroundColor: colors.surface },
   modelName: { flexDirection: "row", alignItems: "center", gap: 9, minHeight: 46, paddingLeft: 12 },
+  modelOptions: { padding: 12, gap: 4, borderRadius: 10, backgroundColor: colors.tint },
+  optionNumber: { width: 96, minHeight: 38 },
   name: { color: colors.text, fontSize: 14, flexShrink: 1 },
   results: { marginTop: 3, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 10, backgroundColor: colors.surface, gap: 2 },
   result: { flexDirection: "row", alignItems: "center", minHeight: 43, paddingHorizontal: 8, gap: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },

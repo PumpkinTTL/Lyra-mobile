@@ -5,6 +5,7 @@ export type Project = { id: string; name: string };
 export type FileEntry = { path: string; directory: boolean; size: number };
 export type WorkspaceFile = { base64: string; mime: string; truncated: boolean };
 export type WorkspaceAttachment = { name: string; path: string; mime: string; size: number };
+export type WorkspaceArtifact = { path: string; projectId?: string };
 
 export type WorkspaceIO = {
   list(path: string, recursive: boolean, limit: number): Promise<{ entries: FileEntry[]; truncated: boolean }>;
@@ -23,6 +24,11 @@ type NativeWorkspace = {
   importProject(): Promise<Project | null>;
   exportProject(project: string): Promise<string | null>;
   pickAttachments(project: string): Promise<WorkspaceAttachment[] | null>;
+  shareFile(project: string, path: string): Promise<void>;
+  saveFile(project: string, path: string): Promise<string | null>;
+  openFile(project: string, path: string): Promise<void>;
+  copyText(text: string): Promise<void>;
+  pdfPage?(project: string, path: string, page: number): Promise<{ base64: string; count: number }>;
   list(project: string, path: string, recursive: boolean, limit: number): ReturnType<WorkspaceIO["list"]>;
   read(project: string, path: string, limit: number): ReturnType<WorkspaceIO["read"]>;
   write(project: string, path: string, base64: string): Promise<void>;
@@ -59,6 +65,11 @@ export const createProject = (name: string) => nativeWorkspace().createProject(n
 export const importProject = () => nativeWorkspace().importProject();
 export const exportProject = (id: string) => nativeWorkspace().exportProject(id);
 export const pickAttachments = (id: string) => nativeWorkspace().pickAttachments(id);
+export const shareFile = (id: string, path: string) => nativeWorkspace().shareFile(id, relativePath(path));
+export const saveFile = (id: string, path: string) => nativeWorkspace().saveFile(id, relativePath(path));
+export const openFile = (id: string, path: string) => nativeWorkspace().openFile(id, relativePath(path));
+export const copyText = (text: string) => nativeWorkspace().copyText(text);
+export const pdfPage = (id: string, path: string, page: number) => nativeWorkspace().pdfPage?.(id, relativePath(path), page);
 
 export function relativePath(value = "."): string {
   const path = value === "/workspace" ? "" : value.replace(/^\/workspace\//, "");

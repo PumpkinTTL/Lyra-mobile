@@ -1,6 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiState } from "@assistant-ui/react-native";
-import { ArrowUp, ChevronDown, File, Paperclip, X } from "lucide-react-native";
+import { ArrowUp, ChevronDown, File, MessageSquarePlus, Paperclip, X } from "lucide-react-native";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { pickAttachments, workspaceSupported } from "./device-workspace";
 import { safeModelError } from "./model-catalog";
@@ -12,15 +12,19 @@ export type ComposerProps = {
   modelLabel: string;
   projectId: string;
   onModels(): void;
+  onSteer(text: string): boolean;
 };
 
 export function ChatComposer(props: ComposerProps) {
   const aui = useAui();
   const attachmentCount = useAuiState((state) => state.composer.attachments.length);
   const empty = useAuiState((state) => state.composer.isEmpty);
+  const text = useAuiState((state) => state.composer.text);
   const picking = useRef(false);
   const [attachmentError, setAttachmentError] = useState("");
+  const [steerNotice, setSteerNotice] = useState(false);
   const blocked = props.running || !props.editable;
+  useEffect(() => { if (!props.running) setSteerNotice(false); }, [props.running]);
 
   async function addAttachment() {
     if (blocked || picking.current) return;
@@ -60,8 +64,9 @@ export function ChatComposer(props: ComposerProps) {
         </View>
       ) : null}
       {attachmentError ? <Text accessibilityRole="alert" style={styles.error}>{attachmentError}</Text> : null}
-      <ComposerPrimitive.Input accessibilityLabel="消息" placeholder={props.editable ? "给 Lyra 发消息" : "选择模型后开始对话"}
-        placeholderTextColor={colors.secondary} editable={!blocked} multiline style={styles.input} />
+      {props.running && steerNotice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>已排入当前任务</Text> : null}
+      <ComposerPrimitive.Input accessibilityLabel="消息" placeholder={props.running ? "补充当前任务" : props.editable ? "给 Lyra 发消息" : "选择模型后开始对话"}
+        placeholderTextColor={colors.secondary} editable={props.editable} multiline style={styles.input} />
       <View style={styles.toolbar}>
         <ComposerPrimitive.AddAttachment accessibilityLabel="添加附件" disabled={blocked || !workspaceSupported()} onPress={() => { void addAttachment(); }}
           style={({ pressed }) => [styles.icon, pressed && styles.pressed, blocked && styles.dim]}>
@@ -74,9 +79,14 @@ export function ChatComposer(props: ComposerProps) {
             <ChevronDown size={14} color={colors.secondary} />
           </Pressable>
           {props.running ? (
-            <ComposerPrimitive.Cancel accessibilityLabel="停止生成" hitSlop={5} style={styles.send}>
-              <View style={styles.stop} />
-            </ComposerPrimitive.Cancel>
+            <>
+              {text.trim() ? <Pressable accessibilityRole="button" accessibilityLabel="补充当前任务" style={styles.icon} onPress={() => {
+                if (props.onSteer(text)) { aui.composer.setText(""); setSteerNotice(true); }
+              }}><MessageSquarePlus size={19} color={colors.text} /></Pressable> : null}
+              <ComposerPrimitive.Cancel accessibilityLabel="停止生成" hitSlop={5} style={styles.send}>
+                <View style={styles.stop} />
+              </ComposerPrimitive.Cancel>
+            </>
           ) : (
             <ComposerPrimitive.Send accessibilityLabel="发送消息" hitSlop={5} disabled={blocked || empty}
               style={({ pressed }) => [styles.send, (blocked || empty || pressed) && styles.dim]}>
@@ -108,4 +118,5 @@ const styles = StyleSheet.create({
   attachmentName: { color: colors.text, fontSize: 13, flexShrink: 1 },
   remove: { width: 32, height: 34, alignItems: "center", justifyContent: "center" },
   error: { paddingHorizontal: 10, color: colors.error, fontSize: 14 },
+  notice: { paddingHorizontal: 10, color: colors.secondary, fontSize: 12 },
 });

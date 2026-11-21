@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ThreadMessageLike } from "@assistant-ui/react-native";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { createLocalAgent } from "./agent";
+import { createLocalAgent, localUserMessage } from "./agent";
 import { prepareUserMessage } from "./chat-attachments";
 import { defaultProject, projectIO, workspaceSupported, type Project, type WorkspaceAttachment } from "./device-workspace";
 import { createWorkspaceTools } from "./workspace-tools";
-import { toThreadMessages, type AgentPhase, type ToolRun } from "./chat-messages";
+import { createSshTool } from "./ssh";
+import { toThreadMessages, toolFailed, type AgentPhase, type ToolRun } from "./chat-messages";
 import { newConversation, orderedConversations, replaceConversation, userTitle, type Conversation, type Workspace } from "./conversations";
 import { resolveConnection, safeModelError, type ModelRef, type Provider } from "./model-catalog";
 import { streamingFetch } from "./model-fetch";
-import { loadMessages, openStorage, removeMessages, saveMessages, saveProviders, saveWorkspace } from "./storage";
+import { checkpointMessages, loadMessages, openStorage, removeMessages, saveMessages, saveProviders, saveWorkspace } from "./storage";
 
 type Snapshot = { workspace: Workspace; providers: Provider[] };
 type Runtime = ReturnType<typeof createLocalAgent>;
@@ -26,6 +27,7 @@ export function useLocalChat() {
   const session = useRef<Session | null>(null);
   const unsubscribe = useRef<(() => void) | undefined>(undefined);
   const working = useRef(false);
+  const runController = useRef<AbortController | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
   const [running, setRunning] = useState(false);
@@ -45,11 +47,12 @@ export function useLocalChat() {
     const current = currentConversation(next.workspace);
     const connection = resolveConnection(next.providers, current.model);
     const projectId = current.projectId ?? defaultProject;
-    const tools = workspaceSupported() ? createWorkspaceTools(projectIO(projectId)) : [];
+    const tools = workspaceSupported() ? createWorkspaceTools(projectIO(projectId), projectId) : [];
+    if (current.sshTarget) tools.push(createSshTool(current.sshTarget));
     const runtime = connection
       ? createLocalAgent({
         settings: connection, tools, thinking: current.thinking, projectName: current.projectName ?? "本机工作区",
-        messages: transcript, fetch: streamingFetch,
+        messages: transcript, fetch: streamingFetch, onCompaction: (active) => setPhase(active ? "compacting" : "waiting"),
       })
       : null;
 
@@ -57,8 +60,15 @@ export function useLocalChat() {
     setToolRuns({});
     setPhase("waiting");
     if (runtime) {
-      unsubscribe.current = runtime.agent.subscribe((event) => {
-        if (event.type === "message_update") {
+      let checkpointAt = 0;
+      unsubscribe.current = runtime.agent.subscribe(async (event, signal) => {
+        if (event.type === "agent_start") {
+          setToolRuns({});
+          setPhase("waiting");
+          checkpointAt = 0;
+        } else if (event.type === "turn_start") {
+          setPhase("waiting");
+        } else if (event.type === "message_update") {
           const kind = event.assistantMessageEvent.type;
           if (kind === "thinking_start" || kind === "thinking_delta") setPhase("thinking");
           else if (kind === "text_start" || kind === "text_delta") setPhase("writing");
@@ -68,12 +78,29 @@ export function useLocalChat() {
           setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state: "running" } }));
         } else if (event.type === "tool_execution_update") {
           const output = event.partialResult?.content?.find((part: { type: string; text?: string }) => part.type === "text")?.text;
-          setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state: "running", output } }));
+          setToolRuns((runs) => runs[event.toolCallId]?.state === "running" ? { ...runs, [event.toolCallId]: { state: "running", output } } : runs);
         } else if (event.type === "tool_execution_end") {
-          setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state: event.isError ? "error" : "done", duration: event.durationMs } }));
+          const output = event.result?.content?.filter((part: { type: string; text?: string }) => part.type === "text")
+            .map((part: { text?: string }) => part.text).join("\n") as string | undefined;
+          const state = toolFailed(event.isError, event.result?.details) ? signal.aborted ? "cancelled" : "error" : "done";
+          setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state, duration: event.durationMs, output } }));
+        } else if (event.type === "agent_end") {
+          setToolRuns((runs) => Object.fromEntries(Object.entries(runs).map(([id, run]) => [id, run.state === "running" ? { ...run, state: "cancelled" } : run])));
         }
         const { messages: finalized, streamingMessage } = runtime.agent.state;
-        setMessages(toThreadMessages(finalized, streamingMessage, true, current.id, connection?.apiKey));
+        setMessages(toThreadMessages(finalized, streamingMessage, event.type !== "agent_end", current.id, connection?.apiKey));
+        let checkpoint: AgentMessage[] | undefined;
+        if ((event.type === "message_end" && event.message.role === "user") || (event.type === "turn_end" && event.toolResults.length)) checkpoint = finalized;
+        else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && streamingMessage?.role === "assistant"
+          && Date.now() - checkpointAt >= 4000) {
+          checkpointAt = Date.now();
+          checkpoint = [...finalized, { ...streamingMessage, content: streamingMessage.content.filter((part) => part.type === "text"),
+            stopReason: "error", errorMessage: "上次回复中断，已保留收到的正文。" }];
+        }
+        if (checkpoint) {
+          try { await checkpointMessages(current.id, checkpoint); }
+          catch { /* The final save surfaces any persistent storage error. */ }
+        }
       });
     }
     setMessages(toThreadMessages(transcript, undefined, false, current.id, connection?.apiKey));
@@ -96,6 +123,7 @@ export function useLocalChat() {
     return () => {
       mounted = false;
       unsubscribe.current?.();
+      runController.current?.abort();
       session.current?.runtime?.agent.abort();
     };
   }, [attach, retryCount]);
@@ -113,23 +141,23 @@ export function useLocalChat() {
     }
   }
 
-  const send = useCallback(async (input: string, attachments: readonly WorkspaceAttachment[] = []) => {
+  const run = useCallback(async (perform: (runtime: Runtime, conversation: Conversation, signal: AbortSignal) => Promise<boolean>, initialPhase: AgentPhase) => {
     const currentData = data.current;
     const active = session.current?.runtime;
-    const text = input.trim();
-    if (!currentData || !active || working.current || (!text && !attachments.length)) return false;
+    if (!currentData || !active || working.current) return false;
 
     const conversation = currentConversation(currentData.workspace);
     const secret = resolveConnection(currentData.providers, conversation.model)?.apiKey;
     working.current = true;
+    const controller = new AbortController();
+    runController.current = controller;
     setRunning(true);
-    setPhase("waiting");
+    setPhase(initialPhase);
     setError("");
     let prepared = false;
     try {
-      const message = attachments.length ? await prepareUserMessage(conversation.projectId ?? defaultProject, text, attachments) : text;
-      prepared = true;
-      await active.send(message);
+      prepared = await perform(active, conversation, controller.signal);
+      if (!prepared) return false;
       const agentState = active.agent.state;
       const finalized = secret ? agentState.messages.map((message) => message.role === "assistant" && message.errorMessage
         ? { ...message, errorMessage: safeModelError(message.errorMessage, secret) }
@@ -148,14 +176,49 @@ export function useLocalChat() {
       updateSnapshot({ ...currentData, workspace });
       return true;
     } catch (cause) {
-      setError(safeModelError(cause, secret));
+      if (!controller.signal.aborted) setError(safeModelError(cause, secret));
       return prepared;
     } finally {
       working.current = false;
+      runController.current = null;
       setMessages(toThreadMessages(active.agent.state.messages, undefined, false, conversation.id, secret));
       setRunning(false);
     }
   }, [updateSnapshot]);
+
+  const send = useCallback((input: string, attachments: readonly WorkspaceAttachment[] = []) => {
+    const text = input.trim();
+    if (!text && !attachments.length) return Promise.resolve(false);
+    return run(async (active, conversation, signal) => {
+      const message = attachments.length ? await prepareUserMessage(conversation.projectId ?? defaultProject, text, attachments, signal) : text;
+      if (signal.aborted) return false;
+      await active.send(message);
+      return true;
+    }, attachments.length ? "preparing" : "waiting");
+  }, [run]);
+
+  const regenerate = useCallback(() => run(async (active) => {
+    const saved = active.agent.state.messages;
+    if (!saved.some((message) => message.role === "assistant")) return false;
+    let end = saved.length - 1;
+    while (end >= 0 && saved[end].role !== "user" && saved[end].role !== "toolResult") end--;
+    if (end < 0) return false;
+    // Continue from completed tool results so rerunning a response does not repeat an already executed tool batch.
+    active.agent.state.messages = saved.slice(0, end + 1);
+    try { await active.agent.continue(); }
+    catch (error) { active.agent.state.messages = saved; throw error; }
+    return true;
+  }, "waiting"), [run]);
+
+  const continueReply = useCallback(() => run(async (active) => {
+    const last = active.agent.state.messages.at(-1);
+    if (last?.role !== "assistant" || (last.stopReason !== "length" && last.stopReason !== "error")) return false;
+    const text = last.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
+    if (!text.trim()) return false;
+    const context = last.stopReason === "error" ? "\n上次回复已收到的末尾：\n" + text.slice(-16_000) : "";
+    await active.send(localUserMessage("继续回答", [{ type: "text", text: "接着上次回复的中断处继续，避免重复已输出的内容或已完成的工具操作。" + context }]));
+    return true;
+  }, "waiting"), [run]);
 
   function transcript() {
     return session.current?.runtime?.agent.state.messages ?? session.current?.transcript ?? [];
@@ -242,6 +305,14 @@ export function useLocalChat() {
     });
   }
 
+  function toggleSsh(sshTarget?: string) {
+    return edit(async (current) => {
+      const workspace = replaceConversation(current.workspace, { ...currentConversation(current.workspace), sshTarget });
+      await saveWorkspace(workspace);
+      attach({ ...current, workspace }, transcript());
+    });
+  }
+
   function updateProvider(provider: Provider, selected: ModelRef) {
     return edit(async (current) => {
       const providers = current.providers.some((item) => item.id === provider.id)
@@ -273,7 +344,18 @@ export function useLocalChat() {
 
   const current = snapshot ? currentConversation(snapshot.workspace) : null;
   const providers = snapshot?.providers ?? [];
-  const stopped = () => session.current?.runtime?.agent.abort();
+  function stop() {
+    runController.current?.abort();
+    session.current?.runtime?.agent.abort();
+  }
+
+  function steer(input: string) {
+    const active = session.current?.runtime?.agent;
+    const text = input.trim();
+    if (!active?.signal || active.signal.aborted || !text) return false;
+    active.steer({ role: "user", content: text, timestamp: Date.now() });
+    return true;
+  }
   return {
     ready: snapshot !== null,
     canSend: current !== null && !!resolveConnection(providers, current.model),
@@ -281,7 +363,7 @@ export function useLocalChat() {
     providers,
     conversations: snapshot ? orderedConversations(snapshot.workspace.conversations) : [],
     messages, running, busy, error, phase, toolRuns,
-    send, stop: stopped, retry: () => setRetryCount((count) => count + 1),
-    startChat, openChat, renameChat, deleteChat, chooseModel, chooseProject, chooseThinking, updateProvider, deleteProvider,
+    send, regenerate, continueReply, steer, stop, retry: () => setRetryCount((count) => count + 1),
+    startChat, openChat, renameChat, deleteChat, chooseModel, chooseProject, chooseThinking, toggleSsh, updateProvider, deleteProvider,
   };
 }

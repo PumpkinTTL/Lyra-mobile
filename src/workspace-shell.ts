@@ -63,13 +63,34 @@ export async function runWorkspaceShell(io: WorkspaceIO, input: ShellInput, sign
     const removals = [...initial.keys()].filter((path) => (
       !changes.has(path) || (initial.get(path) === null) !== (changes.get(path) === null)
     ));
-    for (const path of removals.sort((first, second) => second.length - first.length)) await io.remove(relativePath(path));
-    for (const [path, data] of changes) {
-      if (initial.get(path) === data) continue;
-      if (data === null) await io.mkdir(relativePath(path));
-      else await io.write(relativePath(path), data);
+    const removed = new Set(removals);
+    const undo: (() => Promise<void>)[] = [];
+    const restore = (path: string, data: string | null | undefined) => data === undefined ? io.remove(path) : data === null ? io.mkdir(path) : io.write(path, data);
+    try {
+      for (const path of removals.sort((first, second) => second.length - first.length)) {
+        assertActive(cancellation.signal);
+        const local = relativePath(path);
+        await io.remove(local);
+        undo.push(() => restore(local, initial.get(path)));
+      }
+      for (const [path, data] of changes) {
+        if (initial.get(path) === data) continue;
+        assertActive(cancellation.signal);
+        const local = relativePath(path);
+        await restore(local, data);
+        undo.push(() => restore(local, removed.has(path) ? undefined : initial.get(path)));
+      }
+      assertActive(cancellation.signal);
+    } catch (error) {
+      let recoveryFailed = false;
+      for (const recover of undo.reverse()) {
+        try { await recover(); } catch { recoveryFailed = true; }
+      }
+      if (recoveryFailed) throw new Error("保存失败且部分文件无法还原，请检查工作区。", { cause: error });
+      throw error;
     }
-    return result;
+    const changedFiles = [...changes].filter(([path, data]) => data !== null && initial.get(path) !== data).map(([path]) => relativePath(path));
+    return { ...result, changedFiles };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", cancel);

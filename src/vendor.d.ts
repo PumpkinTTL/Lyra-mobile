@@ -3,8 +3,5 @@ declare module "@ungap/structured-clone" {
 }
 
 declare module "react-native-fetch-api" {
-  export function fetch(
-    input: RequestInfo | URL,
-    options?: RequestInit & { reactNative?: { textStreaming?: boolean } },
-  ): Promise<Response>;
+  export const Response: new (body: ReadableStream<Uint8Array>, init: ResponseInit & { url: string }) => Response;
 }

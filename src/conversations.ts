@@ -10,6 +10,7 @@ export type Conversation = {
   projectId?: string;
   projectName?: string;
   thinking?: ThinkingLevel;
+  sshTarget?: string;
 };
 
 export type Workspace = {

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { ArrowLeft, Brain, Check, ChevronRight, Cpu, FolderOpen, Plus, Search, Server, Trash2, X } from "lucide-react-native";
+import { ArrowLeft, Brain, Check, ChevronRight, Cpu, FolderOpen, Plus, Search, Server, Terminal, Trash2, X } from "lucide-react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { type ModelRef, type Provider, protocols, providerRef, safeModelError, sameModel } from "./model-catalog";
@@ -13,10 +13,12 @@ type Props = {
   current: ModelRef;
   thinking: ThinkingLevel;
   projectName: string;
+  sshEnabled: boolean;
   onClose: () => void;
   onSelect: (model: ModelRef) => Promise<void>;
   onThinking: (thinking: ThinkingLevel) => Promise<void>;
   onWorkspace: () => void;
+  onSsh: () => void;
   onSave: (provider: Provider, selected: ModelRef) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 };
@@ -24,7 +26,7 @@ type Props = {
 type Page = "settings" | "models" | "thinking" | "edit";
 const levels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
 
-export function ModelSheet({ initialPage, providers, current, thinking, projectName, onClose, onSelect, onThinking, onWorkspace, onSave, onDelete }: Props) {
+export function ModelSheet({ initialPage, providers, current, thinking, projectName, sshEnabled, onClose, onSelect, onThinking, onWorkspace, onSsh, onSave, onDelete }: Props) {
   const { bottom } = useSafeAreaInsets();
   const [page, setPage] = useState<Page>(initialPage);
   const [backPage, setBackPage] = useState<"settings" | "models">(initialPage);
@@ -127,6 +129,7 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
                       [Cpu, "当前对话模型", activeLabel, () => setPage("models")],
                       [Brain, "思考级别", levels[thinking], () => setPage("thinking")],
                       [FolderOpen, "工作区", projectName, onWorkspace],
+                      [Terminal, "SSH 服务器", sshEnabled ? "已启用" : "未启用", onSsh],
                     ] as const).map(([Icon, label, value, onPress]) => (
                       <Pressable key={label} accessibilityRole="button" accessibilityLabel={label + "：" + value}
                         onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.selected]}>

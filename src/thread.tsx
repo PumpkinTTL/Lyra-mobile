@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from "react-native";
-import { ChainOfThoughtPrimitive, ErrorPrimitive, MessagePrimitive, ThreadPrimitive } from "@assistant-ui/react-native";
-import { Activity, Brain, Check, ChevronDown, File, Settings2, Terminal, TriangleAlert } from "lucide-react-native";
+import { ActionBarPrimitive, ChainOfThoughtPrimitive, ErrorPrimitive, MessagePrimitive, ThreadPrimitive, useAuiState } from "@assistant-ui/react-native";
+import { Activity, Brain, Check, ChevronDown, ChevronRight, Copy, File, RotateCcw, Settings2, Terminal, TriangleAlert } from "lucide-react-native";
 import { useMarkdown } from "react-native-marked";
 import { ChatComposer, type ComposerProps } from "./chat-composer";
-import type { AgentPhase, ToolRun } from "./chat-messages";
+import { toolArtifacts, type AgentPhase, type ToolRun } from "./chat-messages";
+import { copyText, type WorkspaceArtifact } from "./device-workspace";
 import { toolLabels } from "./workspace-tools";
 import { colors } from "./theme";
 
@@ -15,6 +16,8 @@ type Props = {
   phase: AgentPhase;
   toolRuns: Record<string, ToolRun>;
   onRetry(): void;
+  onContinue(): void;
+  onArtifact(file: WorkspaceArtifact): void;
   composer: ComposerProps;
 };
 
@@ -36,15 +39,25 @@ function MessageImage({ uri }: { uri: string }) {
   return <Image accessibilityLabel="图片附件" source={{ uri }} resizeMode="contain" style={styles.image} />;
 }
 
-function UserMessage() {
+function FileLink({ file, name, onOpen }: { file: WorkspaceArtifact; name?: string; onOpen(file: WorkspaceArtifact): void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={"预览文件 " + (name ?? file.path)}
+    onPress={() => onOpen(file)} style={({ pressed }) => [styles.artifact, pressed && styles.pressed]}>
+    <File size={16} color={colors.secondary} /><Text style={styles.artifactName} numberOfLines={2}>{name ?? file.path}</Text>
+    <ChevronRight size={16} color={colors.secondary} />
+  </Pressable>;
+}
+
+function UserMessage({ onArtifact }: Pick<Props, "onArtifact">) {
   return (
     <MessagePrimitive.Root style={styles.userBubble}>
       <MessagePrimitive.Content
         renderText={({ part }) => <Text selectable style={styles.messageText}>{part.text}</Text>}
         renderImage={({ part }) => <MessageImage uri={part.image} />}
-        renderFile={({ part }) => (
-          <View style={styles.attachment}><File size={16} color={colors.accent} /><Text style={styles.detail} numberOfLines={2}>{part.filename ?? part.data}</Text></View>
-        )}
+        renderFile={({ part }) => {
+          const projectId = part.providerMetadata?.lyra?.projectId;
+          return part.sourceType === "id" ? <FileLink file={{ path: part.data, projectId: typeof projectId === "string" ? projectId : undefined }}
+            name={part.filename} onOpen={onArtifact} /> : <Text style={styles.detail}>{part.filename ?? "文件"}</Text>;
+        }}
       />
     </MessagePrimitive.Root>
   );
@@ -66,10 +79,17 @@ function Reasoning({ text, active }: { text: string; active: boolean }) {
   );
 }
 
-function ToolCard({ name, run, result, failed, args }: { name: string; run?: ToolRun; result?: unknown; failed?: boolean; args: unknown }) {
+function ToolCard({ name, run, result, failed, args, active, onArtifact }: { name: string; run?: ToolRun; result?: unknown; failed?: boolean;
+  args: unknown; active: boolean; onArtifact: Props["onArtifact"] }) {
   const [expanded, setExpanded] = useState(false);
-  const state = failed || run?.state === "error" ? "error" : result !== undefined || run?.state === "done" ? "done" : "running";
-  const output = typeof result === "string" ? result : result && typeof result === "object" && "text" in result ? String(result.text ?? "") : "";
+  const payload = result !== null && typeof result === "object" ? result : undefined;
+  const stopped = payload && "cancelled" in payload && payload.cancelled === true;
+  const state = run?.state === "cancelled" ? "cancelled" : failed || run?.state === "error" ? "error"
+    : run?.state === "done" || (result !== undefined && !stopped) ? "done" : stopped || !active ? "cancelled" : run?.state === "running" ? "running" : "queued";
+  const statusText = { queued: "排队中", running: "执行中", done: "已完成", error: "失败", cancelled: "已停止" }[state];
+  const output = typeof result === "string" ? result : payload && "text" in payload ? String(payload.text ?? "") : run?.output ?? "";
+  const artifacts = toolArtifacts(payload);
+  const primaryArtifact = artifacts.length > 0 && ["office_create", "office_edit", "archive_create", "artifact_show"].includes(name);
   const images = result && typeof result === "object" && "images" in result && Array.isArray(result.images)
     ? result.images.filter((image): image is string => typeof image === "string") : [];
   const argLabel = args && typeof args === "object"
@@ -83,34 +103,57 @@ function ToolCard({ name, run, result, failed, args }: { name: string; run?: Too
           <Text style={styles.toolName}>{toolLabels[name] ?? name}</Text>
           {argLabel ? <Text style={styles.eventArgument} numberOfLines={1}>{argLabel}</Text> : null}
         </View>
-        {state === "error" ? <TriangleAlert size={17} color={colors.error} /> :
-          state === "done" ? <Check size={14} color={colors.secondary} /> : <ActivityIndicator size="small" color={colors.secondary} />}
+        {state === "running" ? <ActivityIndicator size="small" color={colors.secondary} /> : null}
+        {state === "error" ? <TriangleAlert size={16} color={colors.error} /> : null}
+        {state === "done" ? <Check size={14} color={colors.secondary} /> : null}
+        <Text style={[styles.toolStatus, state === "error" && styles.error]}>{statusText}</Text>
         <ChevronDown size={15} color={colors.secondary} style={expanded ? styles.up : undefined} />
       </Pressable>
       {run?.output && state === "running" ? <Text accessibilityLiveRegion="polite" style={styles.progress}>{run.output}</Text> : null}
+      {primaryArtifact ? artifacts.slice(0, 3).map((file) => <FileLink key={file.path} file={file} onOpen={onArtifact} />) : null}
       {expanded ? (
         <View style={styles.payload}>
           {args && typeof args === "object" && Object.keys(args).length ? <Text selectable style={styles.code}>{JSON.stringify(args, null, 2).slice(0, 4200)}</Text> : null}
           {output ? <Text selectable style={[styles.code, state === "error" && styles.error]}>{output}</Text> : null}
           {images.map((uri, index) => <MessageImage key={index} uri={uri} />)}
-          {run?.duration !== undefined ? <Text style={styles.detail}>用时 {run.duration} ms</Text> : null}
+          {!primaryArtifact ? artifacts.map((file) => <FileLink key={file.path} file={file} onOpen={onArtifact} />) : null}
+          {run?.duration !== undefined ? <Text style={styles.detail}>用时 {run.duration < 1000 ? `${Math.round(run.duration)} ms` : `${(run.duration / 1000).toFixed(1)} s`}</Text> : null}
         </View>
       ) : null}
     </View>
   );
 }
 
-function AssistantMessage({ runs, thinking }: { runs: Record<string, ToolRun>; thinking: boolean }) {
+function AssistantMessage({ runs, thinking, active, onArtifact, onContinue, canReload }: { runs: Record<string, ToolRun>; thinking: boolean;
+  active: boolean; onArtifact: Props["onArtifact"]; onContinue: Props["onContinue"]; canReload: boolean }) {
+  const last = useAuiState((state) => state.message.isLast);
+  const hasText = useAuiState((state) => state.message.parts.some((part) => part.type === "text" && part.text.trim()));
+  const reason = useAuiState((state) => state.message.status?.type === "incomplete" ? state.message.status.reason : undefined);
   return (
     <MessagePrimitive.Root style={styles.reply}>
       <MessagePrimitive.Content
         renderText={({ part }) => <MarkdownText text={part.text} />}
         renderReasoning={({ part }) => <Reasoning text={part.text} active={thinking} />}
         renderToolCall={({ part }) => (
-          <ToolCard name={part.toolName} args={part.args} run={runs[part.toolCallId]} result={part.result} failed={part.isError} />
+          <ToolCard name={part.toolName} args={part.args} run={runs[part.toolCallId]} result={part.result} failed={part.isError} active={active} onArtifact={onArtifact} />
         )}
       />
       <ErrorPrimitive.Root><ErrorPrimitive.Message style={styles.error} /></ErrorPrimitive.Root>
+      {reason === "cancelled" ? <Text style={styles.detail}>已停止</Text> : null}
+      {reason === "length" ? <Text style={styles.detail}>已达到模型输出上限</Text> : null}
+      {!active && (hasText || (last && canReload)) ? (
+        <View style={styles.messageActions}>
+          {hasText ? <ActionBarPrimitive.Copy copyToClipboard={copyText} accessibilityLabel="复制回复" style={styles.messageAction}>
+            {({ isCopied }) => isCopied ? <Check size={16} color={colors.secondary} /> : <Copy size={16} color={colors.secondary} />}
+          </ActionBarPrimitive.Copy> : null}
+          {last && canReload ? <ActionBarPrimitive.Reload accessibilityLabel={reason ? "重试" : "重新生成"} style={styles.messageAction}>
+            <RotateCcw size={16} color={colors.secondary} />{reason ? <Text style={styles.detail}>重试</Text> : null}
+          </ActionBarPrimitive.Reload> : null}
+          {last && canReload && hasText && (reason === "length" || reason === "error") ? (
+            <Pressable accessibilityRole="button" onPress={onContinue} style={styles.messageAction}><Text style={styles.detail}>继续回答</Text></Pressable>
+          ) : null}
+        </View>
+      ) : null}
     </MessagePrimitive.Root>
   );
 }
@@ -131,7 +174,8 @@ function Welcome({ ready, canSend, error, onRetry, composer }: Props) {
   );
 }
 
-const phaseLabels: Record<AgentPhase, string> = { waiting: "等待模型响应", thinking: "思考中", tool: "正在调用工具", writing: "正在生成回复" };
+const phaseLabels: Record<AgentPhase, string> = { preparing: "正在准备附件", waiting: "等待模型响应", thinking: "思考中", tool: "正在处理工具调用",
+  writing: "正在生成回复", compacting: "正在压缩对话上下文" };
 
 export function Thread(props: Props) {
   const [footerHeight, setFooterHeight] = useState(142);
@@ -146,8 +190,10 @@ export function Thread(props: Props) {
             <Text style={styles.detail}>{phaseLabels[props.phase]}</Text>
           </View>
         ) : undefined}>
-        {({ message }) => message.role === "user" ? <UserMessage /> :
-          <AssistantMessage runs={props.toolRuns} thinking={props.composer.running && props.phase === "thinking" && message.status?.type === "running"} />}
+        {({ message }) => message.role === "user" ? <UserMessage onArtifact={props.onArtifact} /> :
+          <AssistantMessage runs={props.toolRuns} active={props.composer.running && message.status?.type === "running"}
+            canReload={props.canSend && !props.composer.running} onArtifact={props.onArtifact} onContinue={props.onContinue}
+            thinking={props.composer.running && props.phase === "thinking" && message.status?.type === "running"} />}
       </ThreadPrimitive.MessagesFlatList>
       <View pointerEvents="box-none" style={styles.floatingComposer} onLayout={(event) => setFooterHeight(Math.ceil(event.nativeEvent.layout.height))}>
         {props.error ? <Text accessibilityRole="alert" style={styles.threadError}>{props.error}</Text> : null}
@@ -168,7 +214,10 @@ const styles = StyleSheet.create({
   connectText: { color: colors.accentInk, fontSize: 14, fontWeight: "500" },
   userBubble: { alignSelf: "flex-end", maxWidth: "85%", backgroundColor: colors.raised, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 14, gap: 7 },
   messageText: { color: colors.text, fontSize: 16, lineHeight: 24 },
-  attachment: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 25 },
+  artifact: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 42, borderRadius: 8, paddingHorizontal: 9, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  artifactName: { flex: 1, color: colors.text, fontSize: 14 },
+  messageActions: { flexDirection: "row", alignItems: "center", gap: 4 },
+  messageAction: { minWidth: 40, minHeight: 38, justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 5 },
   image: { width: 232, height: 157, maxWidth: "100%", backgroundColor: colors.raised, borderRadius: 10 },
   reply: { alignSelf: "stretch", gap: 4 },
   eventHeader: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8 },
@@ -177,6 +226,7 @@ const styles = StyleSheet.create({
   eventTitle: { color: colors.secondary, fontSize: 14, flex: 1 },
   toolName: { color: colors.text, fontSize: 14 },
   eventArgument: { color: colors.secondary, fontSize: 13, flex: 1 },
+  toolStatus: { color: colors.secondary, fontSize: 12 },
   payload: { paddingLeft: 32, paddingRight: 8, paddingVertical: 6, gap: 6 },
   detail: { color: colors.secondary, fontSize: 13, lineHeight: 19 },
   code: { padding: 8, backgroundColor: colors.raised, color: colors.text, fontFamily: "monospace", fontSize: 12, lineHeight: 18, borderRadius: 7 },

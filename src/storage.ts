@@ -97,6 +97,12 @@ export async function saveMessages(workspace: Workspace, id: string, messages: A
   await AsyncStorage.multiSet([[messageKey(id), saved], [workspaceKey, JSON.stringify(workspace)]]);
 }
 
+export async function checkpointMessages(id: string, messages: AgentMessage[]) {
+  const payload = JSON.stringify(messages);
+  if (workspaceSupported()) return saveTranscript(id, payload);
+  return AsyncStorage.setItem(messageKey(id), payload);
+}
+
 export async function removeMessages(id: string) {
   if (workspaceSupported()) await deleteTranscript(id);
   await AsyncStorage.removeItem(messageKey(id));

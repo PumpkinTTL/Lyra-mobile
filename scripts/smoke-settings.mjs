@@ -15,13 +15,13 @@ const { outputFiles } = await build({
       plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native|react-native-keychain|react-native-fetch-api)$/ }, (args) =>
         ({ path: args.path, namespace: "test" }));
       plugin.onLoad({ filter: /.*/, namespace: "test" }, ({ path }) => {
-        if (path === "react-native") return { contents: "export const NativeModules = {};" };
+        if (path === "react-native") return { contents: "export const NativeModules = {}; export const Networking = new Proxy({}, { get: (_, name) => (...args) => globalThis.lyraTestNative[name](...args) });" };
         if (path.endsWith("async-storage")) return { contents: "export default globalThis.lyraTestStorage;" };
         if (path === "react-native-keychain") return { contents: [
           "export const getGenericPassword = () => globalThis.lyraTestPassword;",
           "export const setGenericPassword = (_user, password) => { globalThis.lyraTestPassword = { password }; return true; };",
         ].join("\n") };
-        return { contents: "export const fetch = (...args) => globalThis.lyraTestFetcher(...args);" };
+        return { contents: "export const Response = globalThis.Response;" };
       });
     },
   }],
@@ -33,7 +33,7 @@ function load(name) {
 }
 
 const { fetchProviderModels, normalizeProvider } = await load("model-catalog.js");
-const { testModelConnection } = await load("agent.js");
+const { createLocalAgent, testModelConnection } = await load("agent.js");
 const provider = { id: "test", name: "  上游模型  ", protocol: "openai", endpoint: "https://example.invalid/v1/chat/completions", apiKey: "test-key", models: [" model-a ", "model-a", ""] };
 const openai = normalizeProvider(provider);
 assert.equal(openai.name, "上游模型");
@@ -115,17 +115,59 @@ await testModelConnection({ ...google, model: "gemini-a" }, async (url) => {
   return sse(data({ candidates: [{ index: 0, finishReason: "STOP", content: { role: "model", parts: [{ text: "OK" }] } }], usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1, totalTokenCount: 3 } }));
 });
 
-globalThis.lyraTestFetcher = async (url, options) => {
-  assert.equal(url, openai.endpoint + "/chat/completions");
-  assert.deepEqual(options.headers, { authorization: "Bearer test-key", "content-type": "application/json" });
-  assert.equal(options.body, "{}");
-  assert.equal(options.reactNative.textStreaming, true);
-  return sse("");
-};
 const { streamingFetch } = await load("model-fetch.js");
-await streamingFetch(new Request(openai.endpoint + "/chat/completions", {
+const handles = new Map();
+const emit = (event, ...args) => handles.get(event)?.(args);
+const requests = [];
+let aborts = 0;
+globalThis.lyraTestNative = {
+  addListener(name, listener) { handles.set(name, listener); return { remove() { handles.delete(name); } }; },
+  sendRequest(method, _tracking, url, headers, body, type, incremental, timeout, notify) {
+    requests.push({ method, url, headers, body, type, incremental, timeout });
+    notify(requests.length);
+  },
+  abortRequest() { aborts++; },
+};
+const url = openai.endpoint + "/chat/completions";
+const pending = streamingFetch(new Request(url, {
   method: "POST", headers: { Authorization: "Bearer test-key", "Content-Type": "application/json" }, body: "{}",
 }));
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(requests[0], { method: "POST", url, headers: { authorization: "Bearer test-key", "content-type": "application/json" }, body: "{}", type: "text", incremental: true, timeout: 0 });
+emit("didReceiveNetworkResponse", 1, 200, { "content-type": "text/event-stream" }, url);
+const reader = (await pending).body.getReader();
+emit("didReceiveNetworkIncrementalData", 99, "another request");
+emit("didReceiveNetworkIncrementalData", 1, "先收到\ud83d");
+emit("didReceiveNetworkIncrementalData", 1, "\ude80");
+emit("didCompleteNetworkResponse", 1, "socket reset", false);
+assert.equal(new TextDecoder().decode((await reader.read()).value), "先收到");
+assert.equal(new TextDecoder().decode((await reader.read()).value), "🚀");
+await assert.rejects(reader.read(), /接收模型回复时网络连接中断/);
+assert.equal(handles.size, 0);
+
+const beforeHeaders = streamingFetch(url);
+emit("didCompleteNetworkResponse", 2, "cannot reach host", false);
+await assert.rejects(beforeHeaders, /无法连接模型网关/);
+const stopper = new AbortController();
+const cancelled = streamingFetch(url, { signal: stopper.signal });
+stopper.abort();
+await assert.rejects(cancelled, /已停止/);
+assert.equal(aborts, 1);
+assert.equal(handles.size, 0);
+
+const agent = createLocalAgent({ settings: { ...openai, model: "model-a" }, fetch: streamingFetch });
+const sent = agent.send("Check interrupted answer");
+await new Promise((resolve) => setImmediate(resolve));
+const id = requests.length;
+emit("didReceiveNetworkResponse", id, 200, { "content-type": "text/event-stream" }, url);
+emit("didReceiveNetworkIncrementalData", id, data({ id: "cutoff", object: "chat.completion.chunk", created: 1, model: "model-a",
+  choices: [{ index: 0, delta: { role: "assistant", content: "部分回复" }, finish_reason: null }] }));
+emit("didCompleteNetworkResponse", id, "socket reset", false);
+await sent;
+const interrupted = agent.agent.state.messages.at(-1);
+assert.equal(interrupted.stopReason, "error");
+assert.match(interrupted.errorMessage, /连接中断/);
+assert.ok(interrupted.content.some((part) => part.type === "text" && part.text === "部分回复"));
 
 const prior = [{ role: "user", content: "旧对话", timestamp: 10 }];
 const records = new Map([

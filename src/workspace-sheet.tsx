@@ -1,23 +1,48 @@
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Image, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { ArrowLeft, Check, Download, File, Folder, FolderOpen, Plus, Upload, X } from "lucide-react-native";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, ExternalLink, File, Folder, FolderOpen, Plus, Share2, Upload, X } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { createProject, decodeFile, exportProject, importProject, listProjects, projectIO, type FileEntry, type Project } from "./device-workspace";
+import { bytesFromBase64, createProject, decodeFile, exportProject, importProject, listProjects, openFile, pdfPage, projectIO, saveFile, shareFile, type FileEntry, type Project } from "./device-workspace";
+import { officeKind, readOffice, type OfficeSection } from "./office";
 import { safeModelError } from "./model-catalog";
 import { colors } from "./theme";
 
 type Props = {
   current: string;
   currentName?: string;
+  initialPath?: string;
+  allowProjectChange: boolean;
   onSelect(project: Project): Promise<void>;
   onClose(): void;
 };
 
-export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Props) {
+type Preview = { path: string; text?: string; image?: string; office?: OfficeSection[]; pdf?: { page: number; count: number } };
+
+async function inspectFile(project: string, path: string, page = 0): Promise<Preview> {
+  if (/\.pdf$/i.test(path)) {
+    const result = await pdfPage(project, path, page);
+    return result ? { path, image: "data:image/png;base64," + result.base64, pdf: { page, count: result.count } }
+      : { path, text: "点击「系统预览」查看 PDF。" };
+  }
+  const kind = officeKind(path);
+  const file = await projectIO(project).read(path, kind ? 16 * 1024 * 1024 : 4 * 1024 * 1024);
+  if (kind && !file.truncated) return { path, office: readOffice(kind, bytesFromBase64(file.base64), 60) };
+  if (/^image\/(png|jpeg|gif|webp)$/.test(file.mime) && !file.truncated) return { path, image: "data:" + file.mime + ";base64," + file.base64 };
+  try {
+    const content = decodeFile(file.base64);
+    return { path, text: content.slice(0, 30_000) + (file.truncated || content.length > 30_000 ? "\n…预览已截断" : "") };
+  } catch {
+    return { path, text: "可用系统预览打开此文件，也可分享或另存。" };
+  }
+}
+
+export function WorkspaceSheet({ current, currentName, initialPath, allowProjectChange, onSelect, onClose }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
-  const [folder, setFolder] = useState("");
-  const [preview, setPreview] = useState<{ path: string; text?: string; image?: string }>();
+  const [folder, setFolder] = useState(initialPath?.split("/").slice(0, -1).join("/") ?? "");
+  const [preview, setPreview] = useState<Preview | undefined>(initialPath ? { path: initialPath } : undefined);
+  const [section, setSection] = useState(0);
+  const [focusedPath, setFocusedPath] = useState(initialPath);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(true);
   const [notice, setNotice] = useState("");
@@ -37,6 +62,17 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
       .finally(() => { if (mounted) setBusy(false); });
     return () => { mounted = false; };
   }, [current, folder]);
+
+  useEffect(() => {
+    if (!initialPath) return;
+    let active = true;
+    inspectFile(current, initialPath).then((file) => {
+      if (active) setPreview((visible) => visible?.path === initialPath ? file : visible);
+    }).catch((cause) => {
+      if (active) setPreview((visible) => visible?.path === initialPath ? { path: initialPath, text: safeModelError(cause) } : visible);
+    });
+    return () => { active = false; };
+  }, [current, initialPath]);
 
   async function perform(action: () => Promise<void>) {
     if (busy) return;
@@ -58,26 +94,47 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
 
   function view(item: FileEntry) {
     if (item.directory) { setFolder(item.path); return; }
+    setFocusedPath(item.path);
+    setSection(0);
+    setPreview({ path: item.path });
     void perform(async () => {
-      const file = await projectIO(current).read(item.path, 3 * 1024 * 1024);
-      if (/^image\/(png|jpeg|gif|webp)$/.test(file.mime) && !file.truncated) {
-        setPreview({ path: item.path, image: "data:" + file.mime + ";base64," + file.base64 });
-      } else {
-        let text: string;
-        try {
-          const content = decodeFile(file.base64);
-          text = content.slice(0, 30_000) + (file.truncated || content.length > 30_000 ? "\n…预览已截断" : "");
-        } catch {
-          text = "此文件为二进制格式。可以通过导出工作区取回原文件。";
-        }
-        setPreview({ path: item.path, text });
-      }
+      let file: Preview;
+      try { file = await inspectFile(current, item.path); }
+      catch (cause) { file = { path: item.path, text: safeModelError(cause) }; }
+      setPreview((visible) => visible?.path === file.path ? file : visible);
     });
   }
 
+  function movePdfPage(path: string, page: number) {
+    void perform(async () => {
+      const file = await inspectFile(current, path, page);
+      setPreview((visible) => visible?.path === path ? file : visible);
+    });
+  }
+
+  function fileActions(file: Preview) {
+    return (
+      <View style={styles.actions}>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => void perform(() => openFile(current, file.path))}>
+          <ExternalLink size={16} color={colors.text} /><Text style={styles.actionLabel}>系统预览</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => void perform(() => shareFile(current, file.path))}>
+          <Share2 size={16} color={colors.text} /><Text style={styles.actionLabel}>分享</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" style={styles.action} disabled={busy} onPress={() => void perform(async () => {
+          const name = await saveFile(current, file.path);
+          if (name) setNotice("已保存「" + name + "」。");
+        })}>
+          <Download size={16} color={colors.text} /><Text style={styles.actionLabel}>另存</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   const project = projects.find((item) => item.id === current);
+  const pdf = preview?.pdf;
   return (
-    <Modal animationType="slide" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
+    <Modal animationType="slide" statusBarTranslucent navigationBarTranslucent onRequestClose={preview ? () => setPreview(undefined) : onClose}>
       <SafeAreaView style={styles.safe}>
         <KeyboardAvoidingView behavior="padding" style={styles.safe}>
           <View style={styles.header}>
@@ -90,9 +147,36 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
             <View style={styles.icon} />
           </View>
           <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-            {preview ? (preview.image
-              ? <Image source={{ uri: preview.image }} style={styles.image} resizeMode="contain" />
-              : <Text selectable style={styles.code}>{preview.text}</Text>
+            {preview ? (
+              <>
+                {fileActions(preview)}
+                {pdf ? (
+                  <View style={styles.pager}>
+                    <Pressable accessibilityLabel="上一页" disabled={busy || pdf.page === 0} style={styles.icon}
+                      onPress={() => movePdfPage(preview.path, pdf.page - 1)}><ChevronLeft size={19} color={colors.text} /></Pressable>
+                    <Text style={styles.hint}>{pdf.page + 1} / {pdf.count}</Text>
+                    <Pressable accessibilityLabel="下一页" disabled={busy || pdf.page + 1 >= pdf.count} style={styles.icon}
+                      onPress={() => movePdfPage(preview.path, pdf.page + 1)}><ChevronRight size={19} color={colors.text} /></Pressable>
+                  </View>
+                ) : null}
+                {preview.image ? <Image accessibilityLabel="文件预览" source={{ uri: preview.image }} style={styles.image} resizeMode="contain" /> : null}
+                {preview.office ? (
+                  <>
+                    {preview.office.length > 1 ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.actions}>
+                      {preview.office.map((item, index) => <Pressable key={index} accessibilityRole="button" accessibilityState={{ selected: section === index }}
+                        onPress={() => setSection(index)} style={[styles.action, section === index && styles.activeSection]}><Text style={styles.actionLabel}>{item.title}</Text></Pressable>)}
+                    </ScrollView> : null}
+                    <Text style={styles.hint}>内容预览 · 完整版式可用系统预览打开</Text>
+                    {preview.office[section]?.rows ? <ScrollView horizontal><View>
+                      {preview.office[section].rows!.map((row, index) => <View key={index} style={styles.tableRow}>
+                        {row.map((cell, cellIndex) => <Text key={cellIndex} selectable style={styles.cell}>{cell.slice(0, 250)}</Text>)}
+                      </View>)}
+                    </View></ScrollView> : <Text selectable style={styles.reading}>{preview.office[section]?.lines.join("\n\n").slice(0, 30_000) || "没有可预览的文本。"}</Text>}
+                  </>
+                ) : null}
+                {preview.text !== undefined ? <Text selectable style={styles.code}>{preview.text || "空文件"}</Text> : null}
+                {preview.text === undefined && !preview.image && !preview.office ? <ActivityIndicator color={colors.secondary} /> : null}
+              </>
             ) : (
               <>
                 <Text style={styles.section}>当前对话工作区</Text>
@@ -101,7 +185,7 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
                   const label = item.name.trim() || (selected ? currentName?.trim() : undefined) || "未命名工作区";
                   return (
                     <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected }}
-                      disabled={busy} onPress={() => choose({ ...item, name: label })}
+                      disabled={busy || !allowProjectChange} onPress={() => choose({ ...item, name: label })}
                       style={({ pressed }) => [styles.row, (pressed || selected) && styles.selected]}>
                       <FolderOpen size={18} color={colors.secondary} />
                       <Text numberOfLines={1} style={styles.rowText}>{label}</Text>
@@ -110,15 +194,15 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
                   );
                 })}
                 <View style={styles.create}>
-                  <TextInput accessibilityLabel="工作区名称" value={name} onChangeText={setName} maxLength={80}
+                  <TextInput accessibilityLabel="工作区名称" value={name} onChangeText={setName} maxLength={80} editable={allowProjectChange}
                     placeholder="新工作区名称" placeholderTextColor={colors.secondary} style={styles.input} />
-                  <Pressable accessibilityRole="button" accessibilityLabel="新建工作区" disabled={busy || !name.trim()}
+                  <Pressable accessibilityRole="button" accessibilityLabel="新建工作区" disabled={busy || !name.trim() || !allowProjectChange}
                     onPress={() => { void perform(async () => { await onSelect(await createProject(name)); onClose(); }); }} style={styles.action}>
                     <Plus size={19} color={colors.accent} />
                   </Pressable>
                 </View>
                 <View style={styles.actions}>
-                  <Pressable accessibilityRole="button" disabled={busy} style={styles.action}
+                  <Pressable accessibilityRole="button" disabled={busy || !allowProjectChange} style={styles.action}
                     onPress={() => { void perform(async () => { const item = await importProject(); if (item) { await onSelect(item); onClose(); } }); }}>
                     <Download size={17} color={colors.accent} /><Text style={styles.actionLabel}>导入文件夹</Text>
                   </Pressable>
@@ -132,7 +216,7 @@ export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Prop
                   <Text style={styles.section} numberOfLines={1}>{folder || project?.name || "文件"}</Text>
                 </View>
                 {files.map((item) => (
-                  <Pressable key={item.path} accessibilityRole="button" onPress={() => view(item)} disabled={busy} style={styles.row}>
+                  <Pressable key={item.path} accessibilityRole="button" onPress={() => view(item)} disabled={busy} style={[styles.row, focusedPath === item.path && styles.selected]}>
                     {item.directory ? <Folder size={18} color={colors.accent} /> : <File size={17} color={colors.secondary} />}
                     <Text style={styles.rowText} numberOfLines={1}>{item.path.split("/").pop()}</Text>
                     {!item.directory ? <Text style={styles.hint}>{item.size} B</Text> : null}
@@ -170,5 +254,10 @@ const styles = StyleSheet.create({
   hint: { color: colors.secondary, fontSize: 13 },
   error: { color: colors.error, fontSize: 14 },
   code: { color: colors.text, fontFamily: "monospace", lineHeight: 20, fontSize: 14 },
+  reading: { color: colors.text, fontSize: 16, lineHeight: 24, paddingVertical: 12 },
+  pager: { flexDirection: "row", justifyContent: "center", alignItems: "center", gap: 14 },
+  tableRow: { flexDirection: "row", borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+  cell: { width: 124, padding: 8, color: colors.text, borderRightWidth: StyleSheet.hairlineWidth, borderColor: colors.border, fontSize: 13 },
+  activeSection: { borderWidth: 1, borderColor: colors.secondary },
   image: { width: "100%", height: 340, backgroundColor: colors.surface },
 });

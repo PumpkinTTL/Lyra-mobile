@@ -5,8 +5,9 @@ export const protocols = {
 };
 
 export type Protocol = keyof typeof protocols;
-export type ModelConnection = { endpoint: string; model: string; apiKey: string; protocol?: Protocol };
-export type Provider = { id: string; name: string; protocol: Protocol; endpoint: string; apiKey: string; models: string[] };
+export type ModelOptions = { contextWindow?: number; maxTokens?: number; images?: boolean; reasoning?: boolean };
+export type ModelConnection = { endpoint: string; model: string; apiKey: string; protocol?: Protocol; options?: ModelOptions };
+export type Provider = { id: string; name: string; protocol: Protocol; endpoint: string; apiKey: string; models: string[]; modelOptions?: Record<string, ModelOptions> };
 export type ModelRef = { providerId: string; model: string } | null;
 
 export function providerRef(provider: Provider, model: string): ModelRef {
@@ -21,7 +22,7 @@ export function resolveConnection(providers: readonly Provider[], ref: ModelRef)
   if (!ref) return null;
   const provider = providers.find((item) => item.id === ref.providerId);
   if (!provider?.models.includes(ref.model)) return undefined;
-  return { endpoint: provider.endpoint, apiKey: provider.apiKey, protocol: provider.protocol, model: ref.model };
+  return { endpoint: provider.endpoint, apiKey: provider.apiKey, protocol: provider.protocol, model: ref.model, options: provider.modelOptions?.[ref.model] };
 }
 
 export function normalizeProvider(draft: Provider): Provider {
@@ -48,7 +49,13 @@ export function normalizeProvider(draft: Provider): Provider {
   const apiKey = draft.apiKey.trim();
   if (!apiKey && url.protocol !== "http:") throw new Error("请填写 API Key。");
   if (/\r|\n/.test(apiKey)) throw new Error("API Key 不能包含换行。");
-  return { ...draft, name, endpoint, apiKey, models: [...new Set(draft.models.map((model) => model.trim()).filter(Boolean))] };
+  const models = [...new Set(draft.models.map((model) => model.trim()).filter(Boolean))];
+  const options = Object.fromEntries(Object.entries(draft.modelOptions ?? {}).filter(([id]) => models.includes(id)));
+  for (const { contextWindow, maxTokens } of Object.values(options)) {
+    if (contextWindow !== undefined && (!Number.isInteger(contextWindow) || contextWindow < 2048 || contextWindow > 2_000_000)) throw new Error("上下文窗口请输入 2048 到 2000000 的整数。");
+    if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens < 128 || maxTokens > 128_000 || maxTokens >= (contextWindow ?? 32768) - 512)) throw new Error("输出上限须小于上下文窗口，并处于 128 到 128000 之间。");
+  }
+  return { ...draft, name, endpoint, apiKey, models, ...(Object.keys(options).length ? { modelOptions: options } : { modelOptions: undefined }) };
 }
 
 type UpstreamModel = { id?: string; name?: string; supportedGenerationMethods?: string[] };
@@ -103,5 +110,8 @@ export async function fetchProviderModels(provider: Provider, request: Fetch = f
 
 export function safeModelError(error: unknown, apiKey = ""): string {
   const value = error instanceof Error ? error.message : String(error);
+  if (/stream ended (?:without (?:a )?finish[_ ]?reason|before message_stop)/i.test(value)) {
+    return "模型回复提前结束，未收到协议结束标记。可以继续回答或重试。";
+  }
   return readableError(value, apiKey) || "模型请求失败。";
 }

@@ -1,10 +1,20 @@
 package com.lyramobile
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.util.AtomicFile
+import java.io.ByteArrayOutputStream
 import java.io.File
 import android.util.Base64
+import androidx.core.content.FileProvider
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.BaseActivityEventListener
@@ -30,7 +40,7 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
   private val io = Executors.newSingleThreadExecutor()
   private val transcripts = File(context.filesDir, "lyra-conversations").apply { mkdirs() }
   private var picker: Picker? = null
-  private data class Picker(val type: Int, val workspace: String, val promise: Promise)
+  private data class Picker(val type: Int, val workspace: String, val path: String, val promise: Promise)
 
   init {
     context.addActivityEventListener(object : BaseActivityEventListener() {
@@ -46,6 +56,13 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
           when (requestCode) {
             PICK_IMPORT -> project(documents.importTree(requireNotNull(data.data)))
             PICK_EXPORT -> documents.export(requireNotNull(data.data), operation.workspace)
+            PICK_SAVE -> {
+              val source = existingFile(operation.workspace, operation.path)
+              context.contentResolver.openOutputStream(requireNotNull(data.data), "w")?.use { output ->
+                source.inputStream().use { it.copyTo(output) }
+              } ?: error("无法写入选定位置。")
+              source.name
+            }
             PICK_ATTACH -> Arguments.createArray().apply {
               for (item in documents.attach(data, operation.workspace)) pushMap(Arguments.createMap().apply {
                 putString("name", item.name)
@@ -78,7 +95,7 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
     putString("name", item.name)
   }
 
-  private fun pick(type: Int, workspace: String, intent: Intent, promise: Promise) {
+  private fun pick(type: Int, workspace: String, intent: Intent, promise: Promise, path: String = "") {
     val activity = context.currentActivity
     if (activity == null) {
       promise.reject("LYRA_PICKER", "请先打开 Lyra。")
@@ -89,7 +106,7 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
         promise.reject("LYRA_PICKER", "已有文件选择操作正在进行。")
         return@runOnUiThread
       }
-      picker = Picker(type, workspace, promise)
+      picker = Picker(type, workspace, path, promise)
       try {
         activity.startActivityForResult(intent, type)
       } catch (error: Exception) {
@@ -122,6 +139,88 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
       putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
     }
     pick(PICK_ATTACH, workspace, intent, promise)
+  }
+
+  private fun existingFile(workspace: String, path: String): File = files.resolve(workspace, path).also {
+    require(it.isFile) { "文件不存在：$path" }
+  }
+
+  private fun presentFile(workspace: String, path: String, share: Boolean, promise: Promise) {
+    io.execute {
+      try {
+        val file = existingFile(workspace, path)
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".workspace.files", file)
+        val intent = Intent(if (share) Intent.ACTION_SEND else Intent.ACTION_VIEW).apply {
+          val mime = WorkspaceDocuments.mime(path)
+          if (share) {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+          } else setDataAndType(uri, mime)
+          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+          clipData = ClipData.newUri(context.contentResolver, file.name, uri)
+        }
+        val activity = context.currentActivity ?: error("请先打开 Lyra。")
+        activity.runOnUiThread {
+          try {
+            activity.startActivity(Intent.createChooser(intent, if (share) "分享文件" else "选择打开方式"))
+            promise.resolve(null)
+          } catch (error: Exception) { promise.reject("LYRA_FILE", error) }
+        }
+      } catch (error: Exception) { promise.reject("LYRA_FILE", error) }
+    }
+  }
+
+  @ReactMethod
+  fun shareFile(workspace: String, path: String, promise: Promise) = presentFile(workspace, path, true, promise)
+
+  @ReactMethod
+  fun openFile(workspace: String, path: String, promise: Promise) = presentFile(workspace, path, false, promise)
+
+  @ReactMethod
+  fun saveFile(workspace: String, path: String, promise: Promise) {
+    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+      addCategory(Intent.CATEGORY_OPENABLE)
+      type = WorkspaceDocuments.mime(path)
+      putExtra(Intent.EXTRA_TITLE, path.substringAfterLast('/'))
+    }
+    pick(PICK_SAVE, workspace, intent, promise, path)
+  }
+
+  @ReactMethod
+  fun copyText(text: String, promise: Promise) {
+    val activity = context.currentActivity
+    if (activity == null) { promise.reject("LYRA_CLIPBOARD", "请先打开 Lyra。"); return }
+    activity.runOnUiThread {
+      try {
+        (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Lyra", text))
+        promise.resolve(null)
+      } catch (error: Exception) { promise.reject("LYRA_CLIPBOARD", error) }
+    }
+  }
+
+  @ReactMethod
+  fun pdfPage(workspace: String, path: String, page: Int, promise: Promise) = work(promise) {
+    val source = existingFile(workspace, path)
+    require(source.extension.equals("pdf", ignoreCase = true)) { "请选择 PDF 文件。" }
+    val descriptor = ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY)
+    val renderer = try { PdfRenderer(descriptor) } catch (error: Exception) { descriptor.close(); throw error }
+    renderer.use {
+      require(page in 0 until it.pageCount) { "PDF 页码超出范围。" }
+      it.openPage(page).use { frame ->
+        val scale = minOf(1.75, 1080.0 / maxOf(frame.width, frame.height))
+        val bitmap = Bitmap.createBitmap((frame.width * scale).toInt().coerceAtLeast(1), (frame.height * scale).toInt().coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        try {
+          bitmap.eraseColor(Color.WHITE)
+          val transform = Matrix().apply { setScale(scale.toFloat(), scale.toFloat()) }
+          frame.render(bitmap, null, transform, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+          val bytes = ByteArrayOutputStream().apply { bitmap.compress(Bitmap.CompressFormat.PNG, 100, this) }
+          Arguments.createMap().apply {
+            putInt("count", it.pageCount)
+            putString("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP))
+          }
+        } finally { bitmap.recycle() }
+      }
+    }
   }
 
   @ReactMethod
@@ -203,5 +302,6 @@ internal class WorkspaceModule(private val context: ReactApplicationContext) : R
     private const val PICK_IMPORT = 7401
     private const val PICK_EXPORT = 7402
     private const val PICK_ATTACH = 7403
+    private const val PICK_SAVE = 7404
   }
 }

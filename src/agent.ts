@@ -1,9 +1,10 @@
 import type { AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Model, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import { Agent, streamAnthropic, streamGoogle, streamOpenAI } from "./pi-runtime";
+import { makeContextBudget } from "./context-budget";
 import { safeModelError, type ModelConnection } from "./model-catalog";
 
-const systemPrompt = "你是 Lyra 的移动端编程助手。使用用户的语言，用工作区工具实际完成任务。路径一律相对于 /workspace。通过 ls、find 和 grep 了解项目，使用 read 检查文件，用 edit 或 write 修改文件，用 bash 运行工作区里的脚本和命令。说明实际做过的更改与验证。";
+const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言，用工作区工具实际完成任务。路径相对于 /workspace。Office 附件使用 office_inspect 按段落、工作表范围或幻灯片读取，可编辑 Word、Excel 和 PowerPoint 用 office_create 生成，现有文档用 office_edit 修改。要求保留原稿时传 outputPath。普通文本和图片用 read，写文本用 edit 或 write。压缩使用 archive_create，交付现有文件使用 artifact_show。bash 是内置命令和管道的沙箱，不能启动外部 Node、Python 或系统程序。仅在用户明确要求操作已配置的服务器时使用 ssh_exec。说明实际做过的更改与验证。";
 
 type Options = {
   settings: ModelConnection;
@@ -13,6 +14,7 @@ type Options = {
   messages?: AgentMessage[];
   fetch?: typeof fetch;
   probe?: boolean;
+  onCompaction?(active: boolean): void;
 };
 
 function configureModel(settings: ModelConnection, request: typeof fetch, probe: boolean, thinking: ThinkingLevel): { model: Model<string>; streamFn: StreamFn } {
@@ -20,11 +22,11 @@ function configureModel(settings: ModelConnection, request: typeof fetch, probe:
     id: settings.model,
     name: settings.model,
     baseUrl: settings.endpoint,
-    reasoning: thinking !== "off",
-    input: ["text" as const, "image" as const],
+    reasoning: thinking !== "off" && settings.options?.reasoning !== false,
+    input: settings.options?.images === false ? ["text" as const] : ["text" as const, "image" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 32_768,
-    maxTokens: probe ? 128 : 4096,
+    contextWindow: settings.options?.contextWindow ?? 32_768,
+    maxTokens: probe ? 128 : Math.min(settings.options?.maxTokens ?? 4096, (settings.options?.contextWindow ?? 32_768) - 768),
   };
 
   const apiOptions = {
@@ -56,18 +58,19 @@ function configureModel(settings: ModelConnection, request: typeof fetch, probe:
 
 export type LocalUserMessage = UserMessage & {
   lyraDisplayText?: string;
-  lyraAttachments?: { name: string; path: string; mime: string }[];
+  lyraAttachments?: { name: string; path: string; mime: string; projectId?: string }[];
 };
 
-export function createLocalAgent({ settings, tools = [], thinking = "off", projectName, messages, fetch: request = fetch, probe = false }: Options) {
+export function createLocalAgent({ settings, tools = [], thinking = "off", projectName, messages, fetch: request = fetch, probe = false, onCompaction }: Options) {
   const { model, streamFn } = configureModel(settings, request, probe, thinking);
   const prompt = projectName ? systemPrompt + " 当前工作区：" + projectName : systemPrompt;
   const agent = new Agent({
     initialState: {
-      model, thinkingLevel: thinking, systemPrompt: probe ? "Reply briefly in plain text." : prompt,
+      model, thinkingLevel: model.reasoning ? thinking : "off", systemPrompt: probe ? "Reply briefly in plain text." : prompt,
       tools, messages: messages?.filter((message) => message.role !== "system"),
     },
     streamFn,
+    transformContext: probe ? undefined : makeContextBudget(model, streamFn, onCompaction),
     toolExecution: "sequential",
   });
   return {

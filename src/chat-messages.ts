@@ -2,9 +2,23 @@ import type { ThreadMessageLike } from "@assistant-ui/react-native";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { LocalUserMessage } from "./agent";
 import { safeModelError } from "./model-catalog";
+import type { WorkspaceArtifact } from "./device-workspace";
 
-export type AgentPhase = "waiting" | "thinking" | "tool" | "writing";
-export type ToolRun = { state: "running" | "done" | "error"; output?: string; duration?: number };
+export type AgentPhase = "preparing" | "waiting" | "thinking" | "tool" | "writing" | "compacting";
+export type ToolRun = { state: "running" | "done" | "error" | "cancelled"; output?: string; duration?: number };
+
+export function toolFailed(isError: boolean, details: unknown) {
+  return isError || (!!details && typeof details === "object" && "exitCode" in details
+    && typeof details.exitCode === "number" && details.exitCode !== 0);
+}
+
+export function toolArtifacts(details: unknown): WorkspaceArtifact[] {
+  if (!details || typeof details !== "object" || !("artifacts" in details) || !Array.isArray(details.artifacts)) return [];
+  return details.artifacts.flatMap((item: unknown) => {
+    if (!item || typeof item !== "object" || !("path" in item) || typeof item.path !== "string" || !item.path) return [];
+    return [{ path: item.path, projectId: "projectId" in item && typeof item.projectId === "string" ? item.projectId : undefined }];
+  });
+}
 
 export function toThreadMessages(
   messages: readonly AgentMessage[],
@@ -31,7 +45,8 @@ export function toThreadMessages(
         if (part.type === "image") content.push({ type: "image", image: "data:" + part.mimeType + ";base64," + part.data });
       }
       for (const attachment of local.lyraAttachments ?? []) {
-        content.push({ type: "file", filename: attachment.name, mimeType: attachment.mime, data: attachment.path, sourceType: "id" });
+        content.push({ type: "file", filename: attachment.name, mimeType: attachment.mime, data: attachment.path, sourceType: "id",
+          ...(attachment.projectId ? { providerMetadata: { lyra: { projectId: attachment.projectId } } } : {}) });
       }
       return [{ id, role: "user", createdAt, content }];
     }
@@ -44,22 +59,22 @@ export function toThreadMessages(
         content.push({ type: "reasoning", text: part.thinking });
       } else if (part.type === "toolCall") {
         const result = results.get(part.id);
+        const artifacts = toolArtifacts(result?.details);
+        const text = result?.content.filter((item) => item.type === "text").map((item) => item.text).join("\n") ?? "";
+        const images = result?.content.filter((item) => item.type === "image").map((item) => "data:" + item.mimeType + ";base64," + item.data) ?? [];
         content.push({
           type: "tool-call",
           toolCallId: part.id,
           toolName: part.name,
           args: part.arguments,
           ...(result ? {
-            result: result.content.some((item) => item.type === "image") ? {
-              text: result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"),
-              images: result.content.filter((item) => item.type === "image").map((item) => "data:" + item.mimeType + ";base64," + item.data),
-            } : result.content.map((item) => item.type === "text" ? item.text : "").join("\n"),
-            isError: result.isError,
-          } : !busy ? { result: "工具未执行完毕", isError: true } : {}),
+            result: images.length || artifacts.length ? { text, images, artifacts } : text,
+            isError: toolFailed(result.isError, result.details),
+          } : !busy ? { result: { text: "工具没有完成。", cancelled: true } } : {}),
         });
       }
     }
-    if (!content.length && !message.errorMessage && message !== partial) return [];
+    if (!content.length && !message.errorMessage && message.stopReason !== "length" && message !== partial) return [];
     return [{
       id,
       role: "assistant",
@@ -69,7 +84,9 @@ export function toThreadMessages(
         ? { type: "incomplete", reason: "cancelled" }
         : message.errorMessage
           ? { type: "incomplete", reason: "error", error: safeModelError(message.errorMessage, apiKey) }
-          : message === partial && busy
+          : message.stopReason === "length"
+            ? { type: "incomplete", reason: "length" }
+            : message === partial && busy
             ? { type: "running" }
             : { type: "complete", reason: "stop" },
     }];
@@ -84,6 +101,10 @@ export function toThreadMessages(
     } else {
       turns.push(row);
     }
+  }
+  const last = turns.at(-1);
+  if (busy && last?.role === "assistant" && last.status?.type !== "incomplete") {
+    turns[turns.length - 1] = { ...last, status: { type: "running" } };
   }
   return turns;
 }
