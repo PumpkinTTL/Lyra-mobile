@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { build } from "esbuild";
 
 const { outputFiles } = await build({
-  entryPoints: ["src/model-catalog.ts", "src/agent.ts", "src/storage.ts", "src/model-fetch.ts"],
+  entryPoints: ["src/model-catalog.ts", "src/agent.ts", "src/storage.ts", "src/model-fetch.ts", "src/ssh.ts"],
   outdir: "dist",
   bundle: true,
   platform: "browser",
@@ -12,11 +12,12 @@ const { outputFiles } = await build({
   plugins: [{
     name: "native-test-adapters",
     setup(plugin) {
-      plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native|react-native-keychain|react-native-fetch-api)$/ }, (args) =>
+      plugin.onResolve({ filter: /^(@react-native-async-storage\/async-storage|react-native|react-native-keychain|react-native-fetch-api|@osuki-dev\/react-native-ssh)$/ }, (args) =>
         ({ path: args.path, namespace: "test" }));
       plugin.onLoad({ filter: /.*/, namespace: "test" }, ({ path }) => {
-        if (path === "react-native") return { contents: "export const NativeModules = {}; export const Networking = new Proxy({}, { get: (_, name) => (...args) => globalThis.lyraTestNative[name](...args) });" };
+        if (path === "react-native") return { contents: "export const NativeModules = {}; export const Alert = {alert: (...args) => globalThis.lyraTestApproval(...args)}; export const Networking = new Proxy({}, { get: (_, name) => (...args) => globalThis.lyraTestNative[name](...args) });" };
         if (path.endsWith("async-storage")) return { contents: "export default globalThis.lyraTestStorage;" };
+        if (path.endsWith("react-native-ssh")) return { contents: "export const connect = (...args) => globalThis.lyraTestConnect(...args);" };
         if (path === "react-native-keychain") return { contents: [
           "export const getGenericPassword = () => globalThis.lyraTestPassword;",
           "export const setGenericPassword = (_user, password) => { globalThis.lyraTestPassword = { password }; return true; };",
@@ -32,7 +33,8 @@ function load(name) {
   return import("data:text/javascript;base64," + Buffer.from(output.contents).toString("base64"));
 }
 
-const { fetchProviderModels, normalizeProvider } = await load("model-catalog.js");
+const { effectiveThinking, fetchProviderCatalog, normalizeProvider, resolveConnection } = await load("model-catalog.js");
+const fetchProviderModels = async (...args) => (await fetchProviderCatalog(...args)).map(({ id }) => id);
 const { createLocalAgent, testModelConnection } = await load("agent.js");
 const provider = { id: "test", name: "  上游模型  ", protocol: "openai", endpoint: "https://example.invalid/v1/chat/completions", apiKey: "test-key", models: [" model-a ", "model-a", ""] };
 const openai = normalizeProvider(provider);
@@ -59,6 +61,16 @@ const models = await fetchProviderModels(openai, async (url, options) => {
 assert.deepEqual(models, ["model-a", "model-b"]);
 await assert.rejects(fetchProviderModels(openai, async () => Response.json({ error: { message: "Key test-key rejected" } }, { status: 401 })),
   (error) => error.message.includes("401") && !error.message.includes("test-key"));
+
+const [metadata] = await fetchProviderCatalog(openai, async () => Response.json({ data: [{ id: "model-a", name: "Example",
+  context_length: 180_000, top_provider: { context_length: 128_000, max_completion_tokens: 24_000 },
+  architecture: { input_modalities: ["text"] }, supported_parameters: ["reasoning_effort"], supported_efforts: ["low", "high"] }] }));
+assert.deepEqual(metadata.options, { contextWindow: 128_000, maxTokens: 24_000, images: false, reasoning: true, thinkingLevels: ["low", "high"] });
+const savedProvider = normalizeProvider({ ...openai, modelMetadata: { "model-a": metadata.options }, modelOptions: { "model-a": { maxTokens: 30_000, thinkingLevels: [] } } });
+const connection = resolveConnection([savedProvider], { providerId: savedProvider.id, model: "model-a" });
+assert.deepEqual(connection.options, { contextWindow: 128_000, maxTokens: 30_000, images: false, reasoning: true, thinkingLevels: [] });
+assert.equal(effectiveThinking(connection.options, "high"), "low");
+assert.equal(effectiveThinking({ ...connection.options, reasoning: false }, "high"), "off");
 
 const anthropic = normalizeProvider({ ...provider, endpoint: "https://anthropic.example.invalid/v1", protocol: "anthropic" });
 const anthropicModels = await fetchProviderModels(anthropic, async (url, options) => {
@@ -87,11 +99,37 @@ function sse(payload) {
 function data(value, event) {
   return (event ? "event: " + event + "\n" : "") + "data: " + JSON.stringify(value) + "\n\n";
 }
+function reply(model) {
+  const chunk = (delta, finish_reason) => data({ id: "mock", object: "chat.completion.chunk", created: 1, model, choices: [{ index: 0, delta, finish_reason }] });
+  return sse(chunk({ role: "assistant", content: "OK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n");
+}
+async function captureRequest(settings, thinking) {
+  let payload;
+  const runtime = createLocalAgent({ settings, thinking, fetch: async (_url, init) => {
+    payload = JSON.parse(init.body);
+    return reply(settings.model);
+  } });
+  await runtime.send("Check the request configuration");
+  assert.equal(runtime.agent.state.messages.at(-1).stopReason, "stop");
+  return { payload, model: runtime.agent.state.model };
+}
+const uncapped = (await captureRequest({ ...openai, model: "model-a" }, "off")).payload;
+assert.equal(uncapped.max_tokens, undefined);
+assert.equal(uncapped.max_completion_tokens, undefined);
+const manual = await captureRequest(connection, "high");
+assert.equal(manual.payload.max_completion_tokens, 30_000);
+assert.equal(manual.payload.reasoning_effort, undefined);
+assert.deepEqual(manual.model.input, ["text"]);
+const tiered = await captureRequest({ ...connection, options: metadata.options }, "high");
+assert.equal(tiered.payload.max_completion_tokens, 24_000);
+assert.equal(tiered.payload.reasoning_effort, "high");
+assert.deepEqual((await captureRequest({ ...connection, model: "zcode/GLM-5.3-Flash-Trial" }, "off")).payload.thinking, { type: "disabled" });
+
 await testModelConnection({ ...openai, model: "model-a" }, async (url, init) => {
   assert.equal(String(url), openai.endpoint + "/chat/completions");
   assert.equal(JSON.parse(init.body).tools, undefined);
-  const chunk = (delta, finish_reason) => data({ id: "mock", object: "chat.completion.chunk", created: 1, model: "model-a", choices: [{ index: 0, delta, finish_reason }] });
-  return sse(chunk({ role: "assistant", content: "OK" }, null) + chunk({}, "stop") + "data: [DONE]\n\n");
+  assert.equal(JSON.parse(init.body).max_completion_tokens, 128);
+  return reply("model-a");
 });
 
 await testModelConnection({ ...anthropic, model: "claude-a" }, async (url) => {
@@ -168,6 +206,43 @@ const interrupted = agent.agent.state.messages.at(-1);
 assert.equal(interrupted.stopReason, "error");
 assert.match(interrupted.errorMessage, /连接中断/);
 assert.ok(interrupted.content.some((part) => part.type === "text" && part.text === "部分回复"));
+
+const ssh = await load("ssh.js");
+const sshTools = ssh.createSshTools();
+assert.deepEqual(sshTools.map(({ name }) => name), ["ssh_servers", "ssh_exec"]);
+await assert.rejects(sshTools[1].execute("request", { server: "missing", command: "printf fixture" }), /添加服务器和凭据/);
+const credentials = { host: "server.local", port: 22, username: "local", fingerprint: "SHA256:" + "A".repeat(43), auth: { type: "password", password: "fixture-secret" } };
+globalThis.lyraTestPassword = { password: JSON.stringify(credentials) };
+assert.equal((await ssh.loadSshProfiles())[0].label, "server.local");
+await ssh.saveSshProfile({ ...credentials, label: "Staging", host: "staging.local" });
+assert.equal((await ssh.loadSshProfiles()).length, 2);
+const visibleServers = (await sshTools[0].execute("discover", {})).content[0].text;
+assert.match(visibleServers, /Staging: staging.local:22/);
+assert.doesNotMatch(visibleServers, /fixture-secret|SHA256:/);
+await assert.rejects(sshTools[1].execute("needs-target", { command: "printf fixture" }), /唯一的连接名称/);
+const command = "printf fixture";
+globalThis.lyraTestApproval = (_title, details, buttons) => {
+  assert.match(details, /staging\.local/);
+  assert.ok(details.endsWith(command));
+  buttons.find(({ text }) => text === "执行").onPress();
+};
+globalThis.lyraTestConnect = async ({ host, verifyHostKey }) => {
+  assert.equal(host, "staging.local");
+  assert.equal(verifyHostKey({ fingerprint: credentials.fingerprint }), true);
+  return {
+    async openShell(options, events) {
+      assert.equal(options.command, command);
+      events.onData(new TextEncoder().encode("fixture").buffer);
+      events.onClosed(0);
+      return { close: async () => {} };
+    },
+    async disconnect() {},
+  };
+};
+assert.match((await sshTools[1].execute("named", { server: "Staging", command })).content[0].text, /^fixture\n退出码 0$/);
+delete globalThis.lyraTestApproval;
+delete globalThis.lyraTestConnect;
+delete globalThis.lyraTestPassword;
 
 const prior = [{ role: "user", content: "旧对话", timestamp: 10 }];
 const records = new Map([

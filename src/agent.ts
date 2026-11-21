@@ -2,9 +2,9 @@ import type { AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@earendil
 import type { ImageContent, Model, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import { Agent, streamAnthropic, streamGoogle, streamOpenAI } from "./pi-runtime";
 import { makeContextBudget } from "./context-budget";
-import { safeModelError, type ModelConnection } from "./model-catalog";
+import { defaultContextWindow, effectiveThinking, safeModelError, thinkingLevels, type ModelConnection } from "./model-catalog";
 
-const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言，用工作区工具实际完成任务。路径相对于 /workspace。Office 附件使用 office_inspect 按段落、工作表范围或幻灯片读取，可编辑 Word、Excel 和 PowerPoint 用 office_create 生成，现有文档用 office_edit 修改。要求保留原稿时传 outputPath。普通文本和图片用 read，写文本用 edit 或 write。压缩使用 archive_create，交付现有文件使用 artifact_show。bash 是内置命令和管道的沙箱，不能启动外部 Node、Python 或系统程序。仅在用户明确要求操作已配置的服务器时使用 ssh_exec。说明实际做过的更改与验证。";
+const systemPrompt = "你是 Lyra 的端侧助手。使用用户的语言，用工作区工具实际完成任务。路径相对于 /workspace。Office 附件使用 office_inspect 按段落、工作表范围或幻灯片读取，可编辑 Word、Excel 和 PowerPoint 用 office_create 生成，现有文档用 office_edit 修改。要求保留原稿时传 outputPath。普通文本和图片用 read，写文本用 edit 或 write。压缩使用 archive_create，交付现有文件使用 artifact_show。bash 是内置命令和管道的沙箱，不能启动外部 Node、Python 或系统程序。用户明确要求管理服务器时，用 ssh_servers 查找已配置的连接，自己拟定命令并通过 ssh_exec 完成任务。凭据在 SSH 设置中管理。说明实际做过的更改与验证。";
 
 type Options = {
   settings: ModelConnection;
@@ -18,15 +18,21 @@ type Options = {
 };
 
 function configureModel(settings: ModelConnection, request: typeof fetch, probe: boolean, thinking: ThinkingLevel): { model: Model<string>; streamFn: StreamFn } {
+  const knownOutput = settings.options?.maxTokens;
+  const contextWindow = settings.options?.contextWindow ?? Math.max(defaultContextWindow, (knownOutput ?? 0) * 2);
+  const capabilities = settings.options;
+  const available = capabilities?.thinkingLevels;
+  const reasoning = capabilities?.reasoning !== false && (capabilities?.reasoning === true || thinking !== "off");
   const common = {
     id: settings.model,
     name: settings.model,
     baseUrl: settings.endpoint,
-    reasoning: thinking !== "off" && settings.options?.reasoning !== false,
-    input: settings.options?.images === false ? ["text" as const] : ["text" as const, "image" as const],
+    reasoning,
+    input: capabilities?.images === false ? ["text" as const] : ["text" as const, "image" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: settings.options?.contextWindow ?? 32_768,
-    maxTokens: probe ? 128 : Math.min(settings.options?.maxTokens ?? 4096, (settings.options?.contextWindow ?? 32_768) - 768),
+    contextWindow,
+    maxTokens: probe ? 128 : Math.min(knownOutput ?? Math.min(16_384, Math.floor(contextWindow / 3)), contextWindow),
+    thinkingLevelMap: available?.length ? Object.fromEntries(thinkingLevels.map((level) => [level, available.includes(level) ? level : null])) : undefined,
   };
 
   const apiOptions = {
@@ -50,8 +56,20 @@ function configureModel(settings: ModelConnection, request: typeof fetch, probe:
       return { model, streamFn: (_model, context, options) => streamGoogle(model, context, { ...options, ...apiOptions }) };
     }
     default: {
-      const model: Model<"openai-completions"> = { ...common, provider: "lyra-openai-compatible", api: "openai-completions" };
-      return { model, streamFn: (_model, context, options) => streamOpenAI(model, context, { ...options, ...apiOptions }) };
+      const glm = reasoning && /(?:^|\/)glm[-_]/i.test(settings.model);
+      const model: Model<"openai-completions"> = { ...common, provider: "lyra-openai-compatible", api: "openai-completions",
+        compat: glm ? { thinkingFormat: "zai", supportsReasoningEffort: (available?.length ?? 0) > 0 } : undefined };
+      return { model, streamFn: (_model, context, options) => streamOpenAI(model, context, { ...options, ...apiOptions,
+        onPayload: async (original, activeModel) => {
+          const payload = (await options?.onPayload?.(original, activeModel) ?? original) as Record<string, unknown>;
+          if (!probe && !knownOutput && options?.maxTokens === undefined) {
+            delete payload.max_tokens;
+            delete payload.max_completion_tokens;
+          }
+          if (available?.length === 0) delete payload.reasoning_effort;
+          return payload;
+        },
+      }) };
     }
   }
 }
@@ -62,11 +80,12 @@ export type LocalUserMessage = UserMessage & {
 };
 
 export function createLocalAgent({ settings, tools = [], thinking = "off", projectName, messages, fetch: request = fetch, probe = false, onCompaction }: Options) {
-  const { model, streamFn } = configureModel(settings, request, probe, thinking);
+  const activeThinking = effectiveThinking(settings.options, thinking);
+  const { model, streamFn } = configureModel(settings, request, probe, activeThinking);
   const prompt = projectName ? systemPrompt + " 当前工作区：" + projectName : systemPrompt;
   const agent = new Agent({
     initialState: {
-      model, thinkingLevel: model.reasoning ? thinking : "off", systemPrompt: probe ? "Reply briefly in plain text." : prompt,
+      model, thinkingLevel: model.reasoning ? activeThinking : "off", systemPrompt: probe ? "Reply briefly in plain text." : prompt,
       tools, messages: messages?.filter((message) => message.role !== "system"),
     },
     streamFn,

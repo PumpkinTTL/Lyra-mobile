@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiState } from "@assistant-ui/react-native";
-import { ArrowUp, ChevronDown, File, MessageSquarePlus, Paperclip, X } from "lucide-react-native";
+import { ArrowUp, ChevronDown, MessageSquarePlus, Paperclip, X } from "lucide-react-native";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { pickAttachments, workspaceSupported } from "./device-workspace";
 import { safeModelError } from "./model-catalog";
 import { colors } from "./theme";
+import { FileIcon } from "./file-icon";
 
 export type ComposerProps = {
   editable: boolean;
+  canSubmit: boolean;
   running: boolean;
+  runningElsewhere: boolean;
   modelLabel: string;
   projectId: string;
   onModels(): void;
@@ -23,7 +26,7 @@ export function ChatComposer(props: ComposerProps) {
   const picking = useRef(false);
   const [attachmentError, setAttachmentError] = useState("");
   const [steerNotice, setSteerNotice] = useState(false);
-  const blocked = props.running || !props.editable;
+  const blocked = !props.editable;
   useEffect(() => { if (!props.running) setSteerNotice(false); }, [props.running]);
 
   async function addAttachment() {
@@ -53,7 +56,7 @@ export function ChatComposer(props: ComposerProps) {
           <ComposerPrimitive.Attachments>
             {({ attachment }) => (
               <AttachmentPrimitive.Root style={styles.attachment}>
-                <File size={14} color={colors.secondary} />
+                <FileIcon name={attachment.name} mime={attachment.contentType} size={14} />
                 <AttachmentPrimitive.Name numberOfLines={1} style={styles.attachmentName} />
                 <AttachmentPrimitive.Remove accessibilityLabel={"移除附件 " + attachment.name} hitSlop={8} style={styles.remove}>
                   <X size={15} color={colors.secondary} />
@@ -65,7 +68,9 @@ export function ChatComposer(props: ComposerProps) {
       ) : null}
       {attachmentError ? <Text accessibilityRole="alert" style={styles.error}>{attachmentError}</Text> : null}
       {props.running && steerNotice ? <Text accessibilityLiveRegion="polite" style={styles.notice}>已排入当前任务</Text> : null}
-      <ComposerPrimitive.Input accessibilityLabel="消息" placeholder={props.running ? "补充当前任务" : props.editable ? "给 Lyra 发消息" : "选择模型后开始对话"}
+      {props.running && attachmentCount ? <Text style={styles.notice}>附件将随下一条消息发送</Text> : null}
+      {props.runningElsewhere ? <Text style={styles.notice}>另一段对话正在工作，可以先准备这条消息。</Text> : null}
+      <ComposerPrimitive.Input accessibilityLabel="消息" placeholder={props.running ? "补充当前任务" : "给 Lyra 发消息"}
         placeholderTextColor={colors.secondary} editable={props.editable} multiline style={styles.input} />
       <View style={styles.toolbar}>
         <ComposerPrimitive.AddAttachment accessibilityLabel="添加附件" disabled={blocked || !workspaceSupported()} onPress={() => { void addAttachment(); }}
@@ -73,7 +78,7 @@ export function ChatComposer(props: ComposerProps) {
           <Paperclip size={20} color={colors.text} />
         </ComposerPrimitive.AddAttachment>
         <View style={styles.actions}>
-          <Pressable accessibilityRole="button" accessibilityLabel="选择模型" disabled={props.running} onPress={props.onModels}
+          <Pressable accessibilityRole="button" accessibilityLabel="选择模型" onPress={props.onModels}
             style={({ pressed }) => [styles.model, pressed && styles.pressed]}>
             <Text style={styles.modelLabel} numberOfLines={1}>{props.modelLabel}</Text>
             <ChevronDown size={14} color={colors.secondary} />
@@ -88,8 +93,8 @@ export function ChatComposer(props: ComposerProps) {
               </ComposerPrimitive.Cancel>
             </>
           ) : (
-            <ComposerPrimitive.Send accessibilityLabel="发送消息" hitSlop={5} disabled={blocked || empty}
-              style={({ pressed }) => [styles.send, (blocked || empty || pressed) && styles.dim]}>
+            <ComposerPrimitive.Send accessibilityLabel="发送消息" hitSlop={5} disabled={blocked || !props.canSubmit || empty}
+              style={({ pressed }) => [styles.send, (blocked || !props.canSubmit || empty || pressed) && styles.dim]}>
               <ArrowUp size={20} color={colors.accentInk} strokeWidth={2.4} />
             </ComposerPrimitive.Send>
           )}

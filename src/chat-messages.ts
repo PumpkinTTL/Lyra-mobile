@@ -1,11 +1,27 @@
 import type { ThreadMessageLike } from "@assistant-ui/react-native";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import type { LocalUserMessage } from "./agent";
 import { safeModelError } from "./model-catalog";
 import type { WorkspaceArtifact } from "./device-workspace";
 
 export type AgentPhase = "preparing" | "waiting" | "thinking" | "tool" | "writing" | "compacting";
 export type ToolRun = { state: "running" | "done" | "error" | "cancelled"; output?: string; duration?: number };
+export type PartTiming = { startedAt: number; completedAt?: number };
+export type ReplyTiming = Record<number, PartTiming>;
+export type TimedAssistantMessage = AssistantMessage & { lyraThinking?: ReplyTiming };
+export type TimedToolResult = ToolResultMessage & { lyraTiming?: PartTiming };
+
+const producingTools = new Set(["write", "edit", "bash", "office_create", "office_edit", "archive_create", "artifact_show"]);
+
+export function turnArtifacts(parts: readonly { type: string }[]) {
+  const files = new Map<string, WorkspaceArtifact>();
+  for (const part of parts) {
+    if (part.type !== "tool-call" || !("toolName" in part) || typeof part.toolName !== "string" || !producingTools.has(part.toolName) || !("result" in part)) continue;
+    for (const file of toolArtifacts(part.result)) files.set(`${file.projectId ?? ""}\0${file.path}`, file);
+  }
+  return [...files.values()];
+}
 
 export function toolFailed(isError: boolean, details: unknown) {
   return isError || (!!details && typeof details === "object" && "exitCode" in details
@@ -26,6 +42,7 @@ export function toThreadMessages(
   busy: boolean,
   conversationId = "",
   apiKey = "",
+  liveThinking?: ReplyTiming,
 ): ThreadMessageLike[] {
   const all = partial ? [...messages, partial] : messages;
   const results = new Map(
@@ -52,11 +69,14 @@ export function toThreadMessages(
     }
     if (message.role !== "assistant") return [];
     const content: Exclude<ThreadMessageLike["content"], string>[number][] = [];
-    for (const part of message.content) {
+    for (const [partIndex, part] of message.content.entries()) {
       if (part.type === "text" && part.text) {
         content.push({ type: "text", text: part.text });
       } else if (part.type === "thinking" && part.thinking) {
-        content.push({ type: "reasoning", text: part.thinking });
+        const timing = (message === partial ? liveThinking : (message as TimedAssistantMessage).lyraThinking)?.[partIndex];
+        const active = message === partial && busy && timing !== undefined && timing.completedAt === undefined;
+        content.push({ type: "reasoning", id: `${id}:thinking:${partIndex}`, text: part.thinking, timing,
+          status: active ? { type: "running" } : { type: "complete" } });
       } else if (part.type === "toolCall") {
         const result = results.get(part.id);
         const artifacts = toolArtifacts(result?.details);
@@ -67,6 +87,7 @@ export function toThreadMessages(
           toolCallId: part.id,
           toolName: part.name,
           args: part.arguments,
+          timing: (result as TimedToolResult | undefined)?.lyraTiming,
           ...(result ? {
             result: images.length || artifacts.length ? { text, images, artifacts } : text,
             isError: toolFailed(result.isError, result.details),

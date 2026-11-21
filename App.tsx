@@ -19,7 +19,7 @@ type Panel = "history" | "settings" | "models" | "workspace" | "ssh";
 
 function ChatRuntime({ chat, show, close, historyOpen, onArtifact }: { chat: ChatState; show: (panel: Panel) => void; close: () => void;
   historyOpen: boolean; onArtifact(file: WorkspaceArtifact): void }) {
-  const blocked = !chat.canSend || chat.busy;
+  const blocked = !chat.ready || chat.busy;
 
   async function switchChat(action: () => Promise<void>) {
     try {
@@ -45,6 +45,7 @@ function ChatRuntime({ chat, show, close, historyOpen, onArtifact }: { chat: Cha
     },
     onNew: async (message) => {
       if (message.role !== "user") return;
+      Keyboard.dismiss();
       const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
       const files = (message.attachments ?? []).flatMap((attachment) => attachment.content.flatMap((part) => {
         const size = part.type === "file" ? part.providerMetadata?.lyra?.size : undefined;
@@ -63,11 +64,12 @@ function ChatRuntime({ chat, show, close, historyOpen, onArtifact }: { chat: Cha
       <Thread ready={chat.ready} canSend={chat.canSend} error={chat.error} phase={chat.phase} toolRuns={chat.toolRuns} onRetry={chat.retry}
         onArtifact={onArtifact} onContinue={() => { void chat.continueReply(); }}
         composer={{
-          editable: !blocked, running: chat.running, modelLabel: chat.current?.model ? chat.canSend ? chat.current.model.model : "模型不可用" : "选择模型",
+          editable: !blocked, canSubmit: chat.canSend && !chat.runningElsewhere, running: chat.running, runningElsewhere: chat.runningElsewhere,
+          modelLabel: chat.current?.model ? chat.canSend ? chat.current.model.model : "模型不可用" : "选择模型",
           projectId: chat.current?.projectId ?? defaultProject, onModels: () => show("models"), onSteer: chat.steer,
         }} />
       {historyOpen ? (
-        <ConversationDrawer currentId={chat.current?.id} conversations={chat.conversations} disabled={!chat.ready || chat.running || chat.busy}
+        <ConversationDrawer currentId={chat.current?.id} runningId={chat.runningId} conversations={chat.conversations} disabled={blocked}
           onClose={close} onSettings={() => show("settings")} onRename={chat.renameChat} onDelete={chat.deleteChat} />
       ) : null}
     </AssistantRuntimeProvider>
@@ -78,7 +80,7 @@ function Chat() {
   const chat = useLocalChat();
   const [panel, setPanel] = useState<Panel | null>(null);
   const [artifact, setArtifact] = useState<WorkspaceArtifact>();
-  const locked = !chat.ready || chat.running || chat.busy;
+  const locked = !chat.ready;
 
   function show(next: Panel) {
     if (locked && next !== "history") return;
@@ -125,7 +127,7 @@ function Chat() {
         <ModelSheet initialPage={panel} providers={chat.providers} current={chat.current?.model ?? null} onClose={close}
           thinking={chat.current?.thinking ?? "off"} onThinking={chat.chooseThinking}
           projectName={chat.current?.projectName ?? "本机工作区"} onWorkspace={() => show("workspace")}
-          sshEnabled={!!chat.current?.sshTarget} onSsh={() => show("ssh")}
+          running={chat.running} onSsh={() => show("ssh")}
           onSelect={chat.chooseModel} onSave={chat.updateProvider} onDelete={chat.deleteProvider} />
       ) : null}
       {panel === "workspace" ? (
@@ -133,7 +135,7 @@ function Chat() {
           currentName={artifact?.projectId && artifact.projectId !== chat.current?.projectId ? undefined : chat.current?.projectName}
           initialPath={artifact?.path} allowProjectChange={!chat.running && !chat.busy} onClose={close} onSelect={chat.chooseProject} />
       ) : null}
-      {panel === "ssh" ? <SshSheet enabled={!!chat.current?.sshTarget} onToggle={chat.toggleSsh} onClose={() => setPanel("settings")} /> : null}
+      {panel === "ssh" ? <SshSheet onClose={() => setPanel("settings")} /> : null}
     </SafeAreaView>
   );
 }

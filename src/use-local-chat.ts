@@ -5,8 +5,8 @@ import { createLocalAgent, localUserMessage } from "./agent";
 import { prepareUserMessage } from "./chat-attachments";
 import { defaultProject, projectIO, workspaceSupported, type Project, type WorkspaceAttachment } from "./device-workspace";
 import { createWorkspaceTools } from "./workspace-tools";
-import { createSshTool } from "./ssh";
-import { toThreadMessages, toolFailed, type AgentPhase, type ToolRun } from "./chat-messages";
+import { createSshTools } from "./ssh";
+import { toThreadMessages, toolFailed, type AgentPhase, type PartTiming, type ReplyTiming, type TimedAssistantMessage, type TimedToolResult, type ToolRun } from "./chat-messages";
 import { newConversation, orderedConversations, replaceConversation, userTitle, type Conversation, type Workspace } from "./conversations";
 import { resolveConnection, safeModelError, type ModelRef, type Provider } from "./model-catalog";
 import { streamingFetch } from "./model-fetch";
@@ -14,7 +14,9 @@ import { checkpointMessages, loadMessages, openStorage, removeMessages, saveMess
 
 type Snapshot = { workspace: Workspace; providers: Provider[] };
 type Runtime = ReturnType<typeof createLocalAgent>;
-type Session = { runtime: Runtime | null; transcript: AgentMessage[] };
+type Session = { id: string; runtime: Runtime | null; transcript: AgentMessage[]; secret?: string; phase: AgentPhase;
+  tools: Record<string, ToolRun>; thinking: ReplyTiming; detach?: () => void; refresh?: boolean };
+type ActiveRun = { owner: Session; controller: AbortController };
 
 function currentConversation(workspace: Workspace): Conversation {
   const current = workspace.conversations.find((item) => item.id === workspace.activeId);
@@ -25,12 +27,12 @@ function currentConversation(workspace: Workspace): Conversation {
 export function useLocalChat() {
   const data = useRef<Snapshot | null>(null);
   const session = useRef<Session | null>(null);
-  const unsubscribe = useRef<(() => void) | undefined>(undefined);
-  const working = useRef(false);
-  const runController = useRef<AbortController | null>(null);
+  const activeRun = useRef<ActiveRun | null>(null);
+  const editing = useRef(false);
+  const writes = useRef(Promise.resolve());
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
-  const [running, setRunning] = useState(false);
+  const [runningId, setRunningId] = useState<string | null>(null);
   const [phase, setPhase] = useState<AgentPhase>("waiting");
   const [toolRuns, setToolRuns] = useState<Record<string, ToolRun>>({});
   const [busy, setBusy] = useState(false);
@@ -42,53 +44,104 @@ export function useLocalChat() {
     setSnapshot(next);
   }, []);
 
+  const transact = useCallback(<T,>(action: (current: Snapshot) => Promise<T>) => {
+    const pending = writes.current.then(() => {
+      if (!data.current) throw new Error("本地会话尚未就绪。");
+      return action(data.current);
+    });
+    writes.current = pending.then(() => {}, () => {});
+    return pending;
+  }, []);
+
+  const publish = useCallback((owner: Session, streaming: boolean) => {
+    if (session.current !== owner) return;
+    setPhase(owner.phase);
+    setToolRuns(owner.tools);
+    const state = owner.runtime?.agent.state;
+    setMessages(toThreadMessages(state?.messages ?? owner.transcript, state?.streamingMessage, streaming, owner.id, owner.secret, owner.thinking));
+  }, []);
+
   const attach = useCallback((next: Snapshot, transcript: AgentMessage[]) => {
-    unsubscribe.current?.();
     const current = currentConversation(next.workspace);
+    const background = activeRun.current?.owner;
+    if (session.current !== background) session.current?.detach?.();
+    if (current.id === background?.id) {
+      session.current = background;
+      updateSnapshot(next);
+      publish(background, true);
+      return;
+    }
     const connection = resolveConnection(next.providers, current.model);
     const projectId = current.projectId ?? defaultProject;
     const tools = workspaceSupported() ? createWorkspaceTools(projectIO(projectId), projectId) : [];
-    if (current.sshTarget) tools.push(createSshTool(current.sshTarget));
+    tools.push(...createSshTools());
+    const owner: Session = { id: current.id, runtime: null, transcript, secret: connection?.apiKey, phase: "waiting", tools: {}, thinking: {} };
     const runtime = connection
       ? createLocalAgent({
         settings: connection, tools, thinking: current.thinking, projectName: current.projectName ?? "本机工作区",
-        messages: transcript, fetch: streamingFetch, onCompaction: (active) => setPhase(active ? "compacting" : "waiting"),
+        messages: transcript, fetch: streamingFetch, onCompaction: (active) => { owner.phase = active ? "compacting" : "waiting"; publish(owner, true); },
       })
       : null;
 
-    session.current = { runtime, transcript };
-    setToolRuns({});
-    setPhase("waiting");
+    owner.runtime = runtime;
+    session.current = owner;
     if (runtime) {
       let checkpointAt = 0;
-      unsubscribe.current = runtime.agent.subscribe(async (event, signal) => {
+      const toolTiming = new Map<string, PartTiming>();
+      function finishThinking(now: number) {
+        for (const [index, part] of Object.entries(owner.thinking)) {
+          if (part.completedAt === undefined) owner.thinking[Number(index)] = { ...part, completedAt: now };
+        }
+      }
+      owner.detach = runtime.agent.subscribe(async (event, signal) => {
         if (event.type === "agent_start") {
-          setToolRuns({});
-          setPhase("waiting");
+          owner.tools = {};
+          owner.phase = "waiting";
           checkpointAt = 0;
+          toolTiming.clear();
         } else if (event.type === "turn_start") {
-          setPhase("waiting");
+          owner.phase = "waiting";
+        } else if (event.type === "message_start" && event.message.role === "assistant") {
+          owner.thinking = {};
         } else if (event.type === "message_update") {
-          const kind = event.assistantMessageEvent.type;
-          if (kind === "thinking_start" || kind === "thinking_delta") setPhase("thinking");
-          else if (kind === "text_start" || kind === "text_delta") setPhase("writing");
-          else if (kind === "toolcall_start" || kind === "toolcall_delta") setPhase("tool");
+          const update = event.assistantMessageEvent;
+          if (update.type === "thinking_start" || update.type === "thinking_delta") {
+            owner.thinking[update.contentIndex] ??= { startedAt: Date.now() };
+            owner.phase = "thinking";
+          } else if (update.type === "thinking_end") {
+            const timing = owner.thinking[update.contentIndex];
+            if (timing && timing.completedAt === undefined) owner.thinking[update.contentIndex] = { ...timing, completedAt: Date.now() };
+            owner.phase = "waiting";
+          } else if (update.type === "text_start" || update.type === "text_delta") {
+            finishThinking(Date.now()); owner.phase = "writing";
+          } else if (update.type === "toolcall_start" || update.type === "toolcall_delta") {
+            finishThinking(Date.now()); owner.phase = "tool";
+          }
+        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          finishThinking(Date.now());
+          if (Object.keys(owner.thinking).length) (event.message as TimedAssistantMessage).lyraThinking = owner.thinking;
+        } else if (event.type === "message_end" && event.message.role === "toolResult") {
+          const timing = toolTiming.get(event.message.toolCallId);
+          if (timing) (event.message as TimedToolResult).lyraTiming = timing;
         } else if (event.type === "tool_execution_start") {
-          setPhase("tool");
-          setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state: "running" } }));
+          owner.phase = "tool";
+          toolTiming.set(event.toolCallId, { startedAt: Date.now() });
+          owner.tools = { ...owner.tools, [event.toolCallId]: { state: "running" } };
         } else if (event.type === "tool_execution_update") {
           const output = event.partialResult?.content?.find((part: { type: string; text?: string }) => part.type === "text")?.text;
-          setToolRuns((runs) => runs[event.toolCallId]?.state === "running" ? { ...runs, [event.toolCallId]: { state: "running", output } } : runs);
+          if (owner.tools[event.toolCallId]?.state === "running") owner.tools = { ...owner.tools, [event.toolCallId]: { state: "running", output } };
         } else if (event.type === "tool_execution_end") {
           const output = event.result?.content?.filter((part: { type: string; text?: string }) => part.type === "text")
             .map((part: { text?: string }) => part.text).join("\n") as string | undefined;
           const state = toolFailed(event.isError, event.result?.details) ? signal.aborted ? "cancelled" : "error" : "done";
-          setToolRuns((runs) => ({ ...runs, [event.toolCallId]: { state, duration: event.durationMs, output } }));
+          const timing = toolTiming.get(event.toolCallId);
+          if (timing) toolTiming.set(event.toolCallId, { ...timing, completedAt: event.durationMs === undefined ? Date.now() : timing.startedAt + event.durationMs });
+          owner.tools = { ...owner.tools, [event.toolCallId]: { state, duration: event.durationMs, output } };
         } else if (event.type === "agent_end") {
-          setToolRuns((runs) => Object.fromEntries(Object.entries(runs).map(([id, run]) => [id, run.state === "running" ? { ...run, state: "cancelled" } : run])));
+          owner.tools = Object.fromEntries(Object.entries(owner.tools).map(([id, run]) => [id, run.state === "running" ? { ...run, state: "cancelled" } : run]));
         }
         const { messages: finalized, streamingMessage } = runtime.agent.state;
-        setMessages(toThreadMessages(finalized, streamingMessage, event.type !== "agent_end", current.id, connection?.apiKey));
+        publish(owner, event.type !== "agent_end");
         let checkpoint: AgentMessage[] | undefined;
         if ((event.type === "message_end" && event.message.role === "user") || (event.type === "turn_end" && event.toolResults.length)) checkpoint = finalized;
         else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta" && streamingMessage?.role === "assistant"
@@ -103,9 +156,9 @@ export function useLocalChat() {
         }
       });
     }
-    setMessages(toThreadMessages(transcript, undefined, false, current.id, connection?.apiKey));
     updateSnapshot(next);
-  }, [updateSnapshot]);
+    publish(owner, false);
+  }, [publish, updateSnapshot]);
 
   useEffect(() => {
     let mounted = true;
@@ -122,37 +175,40 @@ export function useLocalChat() {
     void initialize();
     return () => {
       mounted = false;
-      unsubscribe.current?.();
-      runController.current?.abort();
-      session.current?.runtime?.agent.abort();
+      const run = activeRun.current;
+      run?.controller.abort();
+      run?.owner.runtime?.agent.abort();
+      run?.owner.detach?.();
+      if (session.current !== run?.owner) session.current?.detach?.();
     };
   }, [attach, retryCount]);
 
   async function edit<T>(run: (current: Snapshot) => Promise<T>) {
-    if (!data.current || working.current) throw new Error("请先结束当前操作。");
-    working.current = true;
+    if (!data.current || editing.current) throw new Error("请先结束当前设置操作。");
+    editing.current = true;
     setBusy(true);
     setError("");
     try {
-      return await run(data.current);
+      return await transact(run);
     } finally {
-      working.current = false;
+      editing.current = false;
       setBusy(false);
     }
   }
 
   const run = useCallback(async (perform: (runtime: Runtime, conversation: Conversation, signal: AbortSignal) => Promise<boolean>, initialPhase: AgentPhase) => {
     const currentData = data.current;
-    const active = session.current?.runtime;
-    if (!currentData || !active || working.current) return false;
+    const owner = session.current;
+    const active = owner?.runtime;
+    if (!currentData || !owner || !active || activeRun.current || editing.current) return false;
 
     const conversation = currentConversation(currentData.workspace);
-    const secret = resolveConnection(currentData.providers, conversation.model)?.apiKey;
-    working.current = true;
+    const secret = owner.secret;
     const controller = new AbortController();
-    runController.current = controller;
-    setRunning(true);
-    setPhase(initialPhase);
+    activeRun.current = { owner, controller };
+    setRunningId(owner.id);
+    owner.phase = initialPhase;
+    publish(owner, true);
     setError("");
     let prepared = false;
     try {
@@ -163,34 +219,36 @@ export function useLocalChat() {
         ? { ...message, errorMessage: safeModelError(message.errorMessage, secret) }
         : message) : agentState.messages;
       const sessionError = agentState.errorMessage;
-      if (sessionError && !agentState.messages.some((message) => message.role === "assistant" && message.errorMessage === sessionError)) {
+      if (session.current === owner && sessionError && !agentState.messages.some((message) => message.role === "assistant" && message.errorMessage === sessionError)) {
         setError(safeModelError(sessionError, secret));
       }
-      const updated = {
-        ...conversation,
-        title: conversation.title || userTitle(finalized) || "新对话",
-        updatedAt: Date.now(),
-      };
-      const workspace = replaceConversation(currentData.workspace, updated);
-      await saveMessages(workspace, conversation.id, finalized);
-      updateSnapshot({ ...currentData, workspace });
+      await transact(async (latest) => {
+        const existing = latest.workspace.conversations.find((item) => item.id === conversation.id);
+        if (!existing) return;
+        const updated = { ...existing, title: existing.title || userTitle(finalized) || "新对话", updatedAt: Date.now() };
+        const workspace = replaceConversation(latest.workspace, updated);
+        await saveMessages(workspace, conversation.id, finalized);
+        updateSnapshot({ ...latest, workspace });
+      });
       return true;
     } catch (cause) {
-      if (!controller.signal.aborted) setError(safeModelError(cause, secret));
+      if (session.current === owner && !controller.signal.aborted) setError(safeModelError(cause, secret));
       return prepared;
     } finally {
-      working.current = false;
-      runController.current = null;
-      setMessages(toThreadMessages(active.agent.state.messages, undefined, false, conversation.id, secret));
-      setRunning(false);
+      activeRun.current = null;
+      if (session.current !== owner) owner.detach?.();
+      else if (owner.refresh && data.current) attach(data.current, active.agent.state.messages);
+      else publish(owner, false);
+      setRunningId(null);
     }
-  }, [updateSnapshot]);
+  }, [attach, publish, transact, updateSnapshot]);
 
   const send = useCallback((input: string, attachments: readonly WorkspaceAttachment[] = []) => {
     const text = input.trim();
     if (!text && !attachments.length) return Promise.resolve(false);
     return run(async (active, conversation, signal) => {
-      const message = attachments.length ? await prepareUserMessage(conversation.projectId ?? defaultProject, text, attachments, signal) : text;
+      const message = attachments.length ? await prepareUserMessage(conversation.projectId ?? defaultProject, text, attachments, signal,
+        active.agent.state.model.input.includes("image")) : text;
       if (signal.aborted) return false;
       await active.send(message);
       return true;
@@ -214,7 +272,7 @@ export function useLocalChat() {
     const last = active.agent.state.messages.at(-1);
     if (last?.role !== "assistant" || (last.stopReason !== "length" && last.stopReason !== "error")) return false;
     const text = last.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n");
-    if (!text.trim()) return false;
+    if (!text.trim() && last.stopReason !== "length") return false;
     const context = last.stopReason === "error" ? "\n上次回复已收到的末尾：\n" + text.slice(-16_000) : "";
     await active.send(localUserMessage("继续回答", [{ type: "text", text: "接着上次回复的中断处继续，避免重复已输出的内容或已完成的工具操作。" + context }]));
     return true;
@@ -222,6 +280,14 @@ export function useLocalChat() {
 
   function transcript() {
     return session.current?.runtime?.agent.state.messages ?? session.current?.transcript ?? [];
+  }
+
+  function refresh(next: Snapshot, retained = transcript()) {
+    const owner = activeRun.current?.owner;
+    if (owner && session.current === owner) {
+      owner.refresh = true;
+      updateSnapshot(next);
+    } else attach(next, retained);
   }
 
   function openChat(id: string) {
@@ -239,7 +305,7 @@ export function useLocalChat() {
     return edit(async (current) => {
       const previous = currentConversation(current.workspace);
       const model = resolveConnection(current.providers, previous.model) === undefined ? null : previous.model;
-      if (!transcript().some((message) => message.role === "user") && !previous.title) return;
+      if (previous.id !== activeRun.current?.owner.id && !transcript().some((message) => message.role === "user") && !previous.title) return;
       const conversation = { ...newConversation(model), projectId: previous.projectId, projectName: previous.projectName, thinking: previous.thinking };
       const workspace = { activeId: conversation.id, conversations: [conversation, ...current.workspace.conversations] };
       await saveWorkspace(workspace);
@@ -260,6 +326,7 @@ export function useLocalChat() {
 
   function deleteChat(id: string) {
     return edit(async (current) => {
+      if (id === activeRun.current?.owner.id) throw new Error("请先停止这段对话正在运行的任务。");
       const remaining = current.workspace.conversations.filter((item) => item.id !== id);
       if (remaining.length === current.workspace.conversations.length) return;
       if (id === current.workspace.activeId) {
@@ -284,13 +351,14 @@ export function useLocalChat() {
       if (resolveConnection(current.providers, model) === undefined) throw new Error("模型已移除，请重新选择。");
       const workspace = replaceConversation(current.workspace, { ...currentConversation(current.workspace), model });
       await saveWorkspace(workspace);
-      attach({ ...current, workspace }, transcript());
+      refresh({ ...current, workspace });
     });
   }
 
   function chooseProject(project: Project) {
     return edit(async (current) => {
       const conversation = currentConversation(current.workspace);
+      if (conversation.id === activeRun.current?.owner.id) throw new Error("请在当前任务完成后切换它的工作区。");
       const workspace = replaceConversation(current.workspace, { ...conversation, projectId: project.id, projectName: project.name });
       await saveWorkspace(workspace);
       attach({ ...current, workspace }, transcript());
@@ -301,15 +369,7 @@ export function useLocalChat() {
     return edit(async (current) => {
       const workspace = replaceConversation(current.workspace, { ...currentConversation(current.workspace), thinking });
       await saveWorkspace(workspace);
-      attach({ ...current, workspace }, transcript());
-    });
-  }
-
-  function toggleSsh(sshTarget?: string) {
-    return edit(async (current) => {
-      const workspace = replaceConversation(current.workspace, { ...currentConversation(current.workspace), sshTarget });
-      await saveWorkspace(workspace);
-      attach({ ...current, workspace }, transcript());
+      refresh({ ...current, workspace });
     });
   }
 
@@ -324,11 +384,12 @@ export function useLocalChat() {
       const model = selected ?? previous.model;
       const workspace = replaceConversation(current.workspace, { ...previous, model });
       const retained = transcript();
+      if (activeRun.current) activeRun.current.owner.refresh = true;
       try {
         await saveWorkspace(workspace);
-        attach({ providers, workspace }, retained);
+        refresh({ providers, workspace }, retained);
       } catch (cause) {
-        attach({ providers, workspace: current.workspace }, retained);
+        refresh({ providers, workspace: current.workspace }, retained);
         throw cause;
       }
     });
@@ -338,15 +399,18 @@ export function useLocalChat() {
     return edit(async (current) => {
       const providers = current.providers.filter((item) => item.id !== id);
       await saveProviders(providers);
-      attach({ ...current, providers }, transcript());
+      if (activeRun.current) activeRun.current.owner.refresh = true;
+      refresh({ ...current, providers });
     });
   }
 
   const current = snapshot ? currentConversation(snapshot.workspace) : null;
   const providers = snapshot?.providers ?? [];
   function stop() {
-    runController.current?.abort();
-    session.current?.runtime?.agent.abort();
+    const active = activeRun.current;
+    if (active?.owner !== session.current || !active) return;
+    active.controller.abort();
+    active.owner.runtime?.agent.abort();
   }
 
   function steer(input: string) {
@@ -362,8 +426,9 @@ export function useLocalChat() {
     current,
     providers,
     conversations: snapshot ? orderedConversations(snapshot.workspace.conversations) : [],
-    messages, running, busy, error, phase, toolRuns,
+    messages, running: runningId !== null && runningId === current?.id, runningElsewhere: runningId !== null && runningId !== current?.id,
+    runningId, busy, error, phase, toolRuns,
     send, regenerate, continueReply, steer, stop, retry: () => setRetryCount((count) => count + 1),
-    startChat, openChat, renameChat, deleteChat, chooseModel, chooseProject, chooseThinking, toggleSsh, updateProvider, deleteProvider,
+    startChat, openChat, renameChat, deleteChat, chooseModel, chooseProject, chooseThinking, updateProvider, deleteProvider,
   };
 }

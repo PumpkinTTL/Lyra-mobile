@@ -2,11 +2,14 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { SshAuth, SshConnection } from "@osuki-dev/react-native-ssh";
 import { Alert } from "react-native";
 import * as Keychain from "react-native-keychain";
+import { localId } from "./conversations";
 
 export type SshProfile = {
+  id?: string; label?: string;
   host: string; port: number; username: string; fingerprint: string;
   auth: Extract<SshAuth, { type: "password" | "privateKey" }>;
 };
+export type SavedSshProfile = SshProfile & { id: string; label: string };
 
 const service = "com.lyramobile.ssh";
 
@@ -22,20 +25,35 @@ export function normalizeSshProfile(profile: SshProfile): SshProfile {
   return { ...profile, host, username, fingerprint };
 }
 
-export async function loadSshProfile(): Promise<SshProfile | null> {
+export async function loadSshProfiles(): Promise<SavedSshProfile[]> {
   const saved = await Keychain.getGenericPassword({ service });
-  return saved ? normalizeSshProfile(JSON.parse(saved.password) as SshProfile) : null;
+  if (!saved) return [];
+  const stored = JSON.parse(saved.password) as SshProfile | SavedSshProfile[];
+  const profiles = Array.isArray(stored) ? stored : [{ ...stored, id: "existing-ssh", label: stored.host }];
+  return profiles.map((profile) => ({ ...normalizeSshProfile(profile), id: profile.id, label: profile.label }));
 }
 
-export async function saveSshProfile(profile: SshProfile) {
-  const validated = normalizeSshProfile(profile);
-  if (!await Keychain.setGenericPassword("lyra-ssh", JSON.stringify(validated), { service })) {
+async function writeProfiles(profiles: SavedSshProfile[]) {
+  if (!await Keychain.setGenericPassword("lyra-ssh", JSON.stringify(profiles), { service })) {
     throw new Error("无法把 SSH 配置写入系统钥匙串。");
   }
-  return sshTarget(validated);
 }
 
-function sshTarget(profile: SshProfile) { return JSON.stringify([profile.host.toLowerCase(), profile.port, profile.username, profile.fingerprint]); }
+export async function saveSshProfile(profile: SshProfile): Promise<SavedSshProfile[]> {
+  const current = await loadSshProfiles();
+  const next = { ...normalizeSshProfile(profile), id: profile.id ?? localId(), label: profile.label?.trim() || profile.host.trim() };
+  if (next.label.length > 80) throw new Error("连接名称最多 80 个字符。");
+  if (current.some((item) => item.id !== next.id && item.label.toLowerCase() === next.label.toLowerCase())) throw new Error("已有同名的 SSH 连接。");
+  const profiles = [...current.filter((item) => item.id !== next.id), next];
+  await writeProfiles(profiles);
+  return profiles;
+}
+
+export async function deleteSshProfile(id: string) {
+  const profiles = (await loadSshProfiles()).filter((item) => item.id !== id);
+  await writeProfiles(profiles);
+  return profiles;
+}
 
 async function connectProfile(profile: SshProfile, signal: AbortSignal) {
   const { connect } = await import("@osuki-dev/react-native-ssh");
@@ -114,17 +132,32 @@ function runRemote(connection: SshConnection, command: string, signal: AbortSign
   });
 }
 
-export function createSshTool(target: string): AgentTool<any> {
-  return {
+function sshOutput(text: string) { return { content: [{ type: "text" as const, text }], details: {} }; }
+
+export function createSshTools(): AgentTool[] {
+  return [{
+    name: "ssh_servers", label: "查找 SSH 连接",
+    description: "List the names and hosts of saved SSH connections for authorized server administration. Only call when the user explicitly requests work on a server. Credentials are never returned.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    async execute() {
+      const profiles = await loadSshProfiles();
+      return sshOutput(profiles.map(({ label, host, port }) => `${label}: ${host}:${port}`).join("\n") || "还没有可用的 SSH 连接。请在设置 → SSH 连接添加服务器和凭据，运维命令由 Agent 拟定。");
+    },
+  }, {
     name: "ssh_exec", label: "服务器命令",
     replay: "never",
-    description: "Run one command on the SSH server that the user selected in this conversation. Only use when explicitly asked to operate on that server. The app asks the user to approve each command. Returns stdout, stderr and exit code.",
-    parameters: { type: "object", properties: { command: { type: "string", minLength: 1, maxLength: 2000 },
+    description: "Write and run a command to complete a server administration task explicitly requested by the user. Select a saved connection by its exact name or host (use ssh_servers for discovery). The app asks the user to approve the exact command. Returns stdout, stderr and exit code. Never ask for private keys or passwords in chat.",
+    parameters: { type: "object", properties: { server: { type: "string", description: "Saved connection name or hostname. May be omitted when exactly one connection exists." }, command: { type: "string", minLength: 1, maxLength: 2000 },
       timeout: { type: "integer", minimum: 1, maximum: 120 } }, required: ["command"], additionalProperties: false },
-    async execute(_call, input: { command: string; timeout?: number }, parent, update) {
-      const profile = await loadSshProfile();
-      if (!profile) throw new Error("请在设置中配置 SSH 服务器。");
-      if (sshTarget(profile) !== target) throw new Error("SSH 服务器配置已变更，请在当前对话重新启用。");
+    async execute(_call, parameters, parent, update) {
+      const input = parameters as { server?: string; command: string; timeout?: number };
+      const profiles = await loadSshProfiles();
+      if (!profiles.length) throw new Error("请在设置 → SSH 连接添加服务器和凭据。无需在聊天中提供密码或编写 SSH 命令。");
+      const target = input.server?.trim().toLowerCase();
+      const named = target ? profiles.find(({ label }) => label.toLowerCase() === target) : undefined;
+      const matching = target ? profiles.filter(({ host }) => host.toLowerCase() === target) : profiles;
+      const profile = named ?? (matching.length === 1 ? matching[0] : undefined);
+      if (!profile) throw new Error("请用 ssh_servers 查看连接，并提供唯一的连接名称。");
       const command = input.command.trim();
       if (!command || command.length > 2000 || command.includes("\0")) throw new Error("SSH 命令长度无效。");
       const controller = new AbortController();
@@ -150,5 +183,5 @@ export function createSshTool(target: string): AgentTool<any> {
         if (connection) void connection.disconnect().catch(() => {});
       }
     },
-  };
+  }];
 }

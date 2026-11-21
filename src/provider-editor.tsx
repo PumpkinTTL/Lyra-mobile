@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
-import { Check, Download, FlaskConical, Plus, X } from "lucide-react-native";
+import { Check, ChevronDown, Download, FlaskConical, Plus, X } from "lucide-react-native";
 import { testModelConnection } from "./agent";
 import { localId } from "./conversations";
-import { fetchProviderModels, normalizeProvider, protocols, providerRef, safeModelError, type ModelOptions, type ModelRef, type Protocol, type Provider } from "./model-catalog";
+import { defaultContextWindow, fetchProviderCatalog, modelOptions, normalizeProvider, protocols, providerRef, reasoningChoices, safeModelError, thinkingLabels, thinkingLevels, type ModelOptions, type ModelRef, type Protocol, type Provider, type UpstreamModel } from "./model-catalog";
 import { streamingFetch } from "./model-fetch";
 import { colors } from "./theme";
 
@@ -22,11 +22,11 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
   });
   const [activeModel, setActiveModel] = useState(provider?.models[0] ?? "");
   const [manualModel, setManualModel] = useState("");
-  const [upstream, setUpstream] = useState<string[]>([]);
+  const [upstream, setUpstream] = useState<UpstreamModel[]>([]);
   const [query, setQuery] = useState("");
   const [limit, setLimit] = useState(40);
   const [task, setTask] = useState<"list" | "test" | "save" | null>(null);
-  const [showModelOptions, setShowModelOptions] = useState(false);
+  const [showModelOptions, setShowModelOptions] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const request = useRef<AbortController | null>(null);
@@ -34,7 +34,7 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
   useEffect(() => () => request.current?.abort(), []);
 
   function update(field: "name" | "endpoint" | "apiKey", value: string) {
-    setDraft((current) => ({ ...current, [field]: value }));
+    setDraft((current) => ({ ...current, [field]: value, ...(field === "endpoint" ? { modelMetadata: undefined } : {}) }));
     setError("");
     setNotice("");
     if (field !== "name") setUpstream([]);
@@ -42,17 +42,19 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
 
   function changeProtocol(protocol: Protocol) {
     if (protocol === draft.protocol) return;
-    setDraft({ ...draft, protocol, endpoint: "" });
+    setDraft({ ...draft, protocol, endpoint: "", modelMetadata: undefined });
     setUpstream([]);
     setError("");
     setNotice("");
   }
 
-  function addModel(value: string) {
+  function addModel(value: string, entry?: UpstreamModel) {
     const model = value.trim();
     if (!model) return;
-    if (!draft.models.includes(model)) setDraft({ ...draft, models: [...draft.models, model] });
+    setDraft((previous) => ({ ...previous, models: previous.models.includes(model) ? previous.models : [...previous.models, model],
+      ...(entry ? { modelMetadata: { ...previous.modelMetadata, [model]: entry.options } } : {}) }));
     setActiveModel(model);
+    setShowModelOptions(true);
     setManualModel("");
     setNotice("");
     setError("");
@@ -90,14 +92,16 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
     try {
       if (action === "list") {
         timeout = setTimeout(() => { timedOut = true; abort.abort(); }, 25_000);
-        const models = await fetchProviderModels(verified, fetch, abort.signal);
+        const models = await fetchProviderCatalog(verified, fetch, abort.signal);
         setUpstream(models);
+        setDraft((previous) => ({ ...previous, modelMetadata: { ...previous.modelMetadata,
+          ...Object.fromEntries(models.filter(({ id }) => previous.models.includes(id)).map(({ id, options }) => [id, options])) } }));
         setLimit(40);
         setQuery("");
-        setNotice(models.length ? "已拉取 " + models.length + " 个模型，点选即可添加。" : "供应商没有返回可用模型，可手动添加。");
+        setNotice(models.length ? "已拉取 " + models.length + " 个模型，并导入供应商提供的能力和参数。" : "供应商没有返回可用模型，可手动添加。");
       } else if (action === "test") {
         if (!selected) throw new Error("请先添加并选中要测试的模型。");
-        await testModelConnection({ ...verified, model: selected, options: verified.modelOptions?.[selected] }, streamingFetch, abort.signal);
+        await testModelConnection({ ...verified, model: selected, options: modelOptions(verified, selected) }, streamingFetch, abort.signal);
         setNotice(selected + " 已成功返回回复。");
       } else {
         await onSave(verified, activate && selected ? providerRef(verified, selected) : null);
@@ -115,12 +119,21 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
   }
 
   function setModelOption<K extends keyof ModelOptions>(name: K, value: ModelOptions[K]) {
-    setDraft((old) => ({ ...old, modelOptions: { ...old.modelOptions, [activeModel]: { ...old.modelOptions?.[activeModel], [name]: value } } }));
+    setDraft((old) => {
+      const next = { ...old.modelOptions?.[activeModel] };
+      if (value === undefined) delete next[name];
+      else next[name] = value;
+      return { ...old, modelOptions: { ...old.modelOptions, [activeModel]: next } };
+    });
     setError("");
   }
 
-  const results = upstream.filter((model) => model.toLowerCase().includes(query.trim().toLowerCase()));
+  const results = upstream.filter(({ id, name }) => `${id} ${name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()));
   const disabled = task !== null;
+  const options = modelOptions(draft, activeModel);
+  const manual = draft.modelOptions?.[activeModel];
+  const inherited = draft.modelMetadata?.[activeModel];
+  const hasOverrides = Object.keys(manual ?? {}).length > 0;
 
   return (
     <View style={styles.form}>
@@ -165,36 +178,50 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
       {draft.models.map((model) => (
         <View key={model} style={[styles.model, activeModel === model && styles.selected]}>
           <Pressable accessibilityRole="radio" accessibilityState={{ checked: activeModel === model }} disabled={disabled}
-            onPress={() => { setActiveModel(model); setNotice(""); }} style={[styles.grow, styles.modelName]}>
+            onPress={() => { if (model === activeModel) setShowModelOptions(!showModelOptions); else { setActiveModel(model); setShowModelOptions(true); } }} style={[styles.grow, styles.modelName]}>
             {activeModel === model ? <Check color={colors.accent} size={17} /> : null}
-            <Text style={styles.name} numberOfLines={1}>{model}</Text>
+            <Text style={[styles.name, styles.grow]} numberOfLines={1}>{model}</Text>
+            <ChevronDown color={colors.secondary} size={17} style={activeModel === model && showModelOptions ? styles.up : undefined} />
           </Pressable>
           <Pressable accessibilityRole="button" accessibilityLabel={"移除模型 " + model} disabled={disabled} onPress={() => removeModel(model)} style={styles.icon}>
             <X color={colors.secondary} size={18} />
           </Pressable>
         </View>
       ))}
-      {activeModel ? <Pressable accessibilityRole="button" onPress={() => setShowModelOptions(!showModelOptions)} style={styles.secondary}>
-        <Text style={styles.secondaryText}>{showModelOptions ? "收起模型参数" : "配置选中模型的能力"}</Text>
-      </Pressable> : null}
       {activeModel && showModelOptions ? (
         <View style={styles.modelOptions}>
-          <Text style={styles.name}>{activeModel}</Text>
-          {([['contextWindow', '上下文窗口', '32768'], ['maxTokens', '输出上限', '4096']] as const).map(([key, title, placeholder]) => (
-            <View key={key} style={styles.actions}>
-              <Text style={[styles.label, styles.grow]}>{title}</Text>
-              <TextInput accessibilityLabel={title} inputMode="numeric" maxLength={7} placeholder={placeholder} placeholderTextColor={colors.secondary}
-                editable={!disabled} style={[styles.input, styles.optionNumber]} value={draft.modelOptions?.[activeModel]?.[key]?.toString() ?? ""}
+          <View style={styles.optionRow}><Text style={[styles.name, styles.grow]}>{activeModel} · 模型能力</Text>
+            {hasOverrides ? <Pressable accessibilityRole="button" disabled={disabled} onPress={() => setDraft((old) => ({ ...old,
+              modelOptions: { ...old.modelOptions, [activeModel]: {} } }))} style={styles.fetch}><Text style={styles.link}>恢复自动</Text></Pressable> : null}
+          </View>
+          {([['contextWindow', '上下文长度', String(defaultContextWindow)], ['maxTokens', '最大输出 Token', '自动']] as const).map(([key, title, placeholder]) => (
+            <View key={key} style={styles.optionRow}>
+              <View style={styles.grow}><Text style={styles.label}>{title}</Text><Text style={styles.caption}>{inherited?.[key] ? `上游：${inherited[key]}` : key === "maxTokens" ? "留空使用协议默认策略" : "用于管理和压缩对话历史"}</Text></View>
+              <TextInput accessibilityLabel={title} inputMode="numeric" maxLength={7} placeholder={inherited?.[key]?.toString() ?? placeholder} placeholderTextColor={colors.secondary}
+                editable={!disabled} style={[styles.input, styles.optionNumber]} value={manual?.[key]?.toString() ?? ""}
                 onChangeText={(text) => setModelOption(key, text.replace(/\D/g, "") ? Number(text.replace(/\D/g, "")) : undefined)} />
             </View>
           ))}
-          {([['images', '支持图片'], ['reasoning', '支持推理']] as const).map(([key, title]) => (
-            <View key={key} style={styles.actions}>
-              <Text style={[styles.label, styles.grow]}>{title}</Text>
-              <Switch accessibilityLabel={title} value={draft.modelOptions?.[activeModel]?.[key] ?? true} disabled={disabled}
+          {([['images', '支持图片'], ['reasoning', '支持思考']] as const).map(([key, title]) => (
+            <View key={key} style={styles.optionRow}>
+              <View style={styles.grow}><Text style={styles.label}>{title}</Text><Text style={styles.caption}>{manual?.[key] !== undefined ? "已手动设置" : inherited?.[key] !== undefined ? "来自上游" : "上游未声明"}</Text></View>
+              <Switch accessibilityLabel={title} value={options[key] ?? true} disabled={disabled}
                 onValueChange={(value) => setModelOption(key, value)} />
             </View>
           ))}
+          {options.reasoning !== false ? <>
+            <View style={styles.optionRow}><Text style={[styles.label, styles.grow]}>支持思考档位</Text>
+              <Switch accessibilityLabel="支持思考档位" disabled={disabled} value={reasoningChoices(options).length > 0}
+                onValueChange={(enabled) => setModelOption("thinkingLevels", enabled ? ["low", "medium", "high"] : [])} />
+            </View>
+            {reasoningChoices(options).length ? <View style={styles.protocols}>{thinkingLevels.map((level) => {
+              const levels = reasoningChoices(options);
+              const selected = levels.includes(level);
+              return <Pressable key={level} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} disabled={disabled}
+                onPress={() => setModelOption("thinkingLevels", selected ? levels.filter((item) => item !== level) : thinkingLevels.filter((item) => item === level || levels.includes(item)))}
+                style={[styles.chip, selected && styles.selected]}><Text style={selected ? styles.selectedText : styles.secondaryText}>{thinkingLabels[level]}</Text></Pressable>;
+            })}</View> : null}
+          </> : null}
         </View>
       ) : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
@@ -218,11 +245,12 @@ export function ProviderEditor({ provider, onSave, onSaved, onBusy }: Props) {
         <View style={styles.results}>
           <TextInput accessibilityLabel="搜索上游模型" value={query} onChangeText={(value) => { setQuery(value); setLimit(40); }}
             placeholder="搜索上游模型" placeholderTextColor={colors.secondary} style={styles.input} autoCapitalize="none" autoCorrect={false} />
-          {results.slice(0, limit).map((model) => (
-            <Pressable key={model} accessibilityRole="button" accessibilityLabel={"添加上游模型 " + model}
-              disabled={disabled || draft.models.includes(model)} onPress={() => addModel(model)} style={styles.result}>
-              <Text style={[styles.name, styles.grow]} numberOfLines={1}>{model}</Text>
-              {draft.models.includes(model) ? <Check color={colors.accent} size={16} /> : <Plus color={colors.accent} size={16} />}
+          {results.slice(0, limit).map((entry) => (
+            <Pressable key={entry.id} accessibilityRole="button" accessibilityLabel={"添加上游模型 " + entry.id}
+              disabled={disabled} onPress={() => { addModel(entry.id, entry); setUpstream([]); }} style={styles.result}>
+              <View style={styles.grow}><Text style={styles.name} numberOfLines={1}>{entry.name || entry.id}</Text>
+                {entry.options.contextWindow || entry.options.maxTokens ? <Text style={styles.caption}>{[entry.options.contextWindow ? `${entry.options.contextWindow} 上下文` : "", entry.options.maxTokens ? `${entry.options.maxTokens} 输出` : ""].filter(Boolean).join(" · ")}</Text> : null}</View>
+              {draft.models.includes(entry.id) ? <Check color={colors.accent} size={16} /> : <Plus color={colors.accent} size={16} />}
             </Pressable>
           ))}
           {!results.length ? <Text style={styles.caption}>没有匹配的模型。</Text> : null}
@@ -258,6 +286,8 @@ const styles = StyleSheet.create({
   modelName: { flexDirection: "row", alignItems: "center", gap: 9, minHeight: 46, paddingLeft: 12 },
   modelOptions: { padding: 12, gap: 4, borderRadius: 10, backgroundColor: colors.tint },
   optionNumber: { width: 96, minHeight: 38 },
+  optionRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  up: { transform: [{ rotate: "180deg" }] },
   name: { color: colors.text, fontSize: 14, flexShrink: 1 },
   results: { marginTop: 3, borderWidth: 1, borderColor: colors.border, borderRadius: 14, padding: 10, backgroundColor: colors.surface, gap: 2 },
   result: { flexDirection: "row", alignItems: "center", minHeight: 43, paddingHorizontal: 8, gap: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },

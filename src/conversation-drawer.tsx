@@ -9,6 +9,7 @@ import { colors } from "./theme";
 
 type Props = {
   currentId?: string;
+  runningId: string | null;
   conversations: Conversation[];
   disabled: boolean;
   onClose: () => void;
@@ -50,12 +51,12 @@ export function ConversationDrawer(props: Props) {
     Alert.alert(item.title || "新对话", undefined, [
       { text: "取消", style: "cancel" },
       { text: "重命名", onPress: () => { setTitle(item.title); setEditing(item.id); } },
-      { text: "删除", style: "destructive", onPress: () => {
+      ...(props.runningId === item.id ? [] : [{ text: "删除", style: "destructive" as const, onPress: () => {
         Alert.alert("删除这段对话？", "此操作会清除手机上的该会话。", [
           { text: "取消", style: "cancel" },
           { text: "删除", style: "destructive", onPress: () => { void handle(() => props.onDelete(item.id)); } },
         ]);
-      } },
+      } }]),
     ]);
   }
 
@@ -76,7 +77,10 @@ export function ConversationDrawer(props: Props) {
     );
 
     const selected = threadId === props.currentId;
-    const label = <ThreadListItemPrimitive.Title fallback="新对话" numberOfLines={1} style={[styles.threadLabel, selected && styles.selectedLabel]} />;
+    const label = <>
+      <ThreadListItemPrimitive.Title fallback="新对话" numberOfLines={1} style={[styles.threadLabel, selected && styles.selectedLabel]} />
+      {threadId === props.runningId ? <Text style={styles.running}>工作中</Text> : null}
+    </>;
     return (
       <ThreadListItemPrimitive.Root style={[styles.row, selected && styles.selected]}>
         {selected ? (
@@ -139,8 +143,9 @@ const styles = StyleSheet.create({
   items: { paddingBottom: 8 },
   row: { flexDirection: "row", alignItems: "center", borderRadius: 8, minHeight: 44 },
   selected: { backgroundColor: colors.tint },
-  thread: { flex: 1, minHeight: 44, justifyContent: "center", borderRadius: 8, paddingHorizontal: 12 },
-  threadLabel: { color: colors.text, fontSize: 15 },
+  thread: { flex: 1, minHeight: 44, flexDirection: "row", alignItems: "center", gap: 6, borderRadius: 8, paddingHorizontal: 12 },
+  threadLabel: { color: colors.text, fontSize: 15, flex: 1 },
+  running: { color: colors.secondary, fontSize: 12 },
   selectedLabel: { fontWeight: "600" },
   rename: { flexDirection: "row", alignItems: "center", gap: 1 },
   input: { flex: 1, color: colors.text, borderWidth: 1, borderColor: colors.border, borderRadius: 10, minHeight: 44, paddingHorizontal: 9 },

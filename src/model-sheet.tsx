@@ -3,7 +3,7 @@ import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, 
 import { ArrowLeft, Brain, Check, ChevronRight, Cpu, FolderOpen, Plus, Search, Server, Terminal, Trash2, X } from "lucide-react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type ModelRef, type Provider, protocols, providerRef, safeModelError, sameModel } from "./model-catalog";
+import { type ModelRef, type Provider, effectiveThinking, modelOptions, protocols, providerRef, reasoningChoices, safeModelError, sameModel, thinkingLabels } from "./model-catalog";
 import { ProviderEditor } from "./provider-editor";
 import { colors } from "./theme";
 
@@ -13,7 +13,7 @@ type Props = {
   current: ModelRef;
   thinking: ThinkingLevel;
   projectName: string;
-  sshEnabled: boolean;
+  running: boolean;
   onClose: () => void;
   onSelect: (model: ModelRef) => Promise<void>;
   onThinking: (thinking: ThinkingLevel) => Promise<void>;
@@ -24,9 +24,8 @@ type Props = {
 };
 
 type Page = "settings" | "models" | "thinking" | "edit";
-const levels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
 
-export function ModelSheet({ initialPage, providers, current, thinking, projectName, sshEnabled, onClose, onSelect, onThinking, onWorkspace, onSsh, onSave, onDelete }: Props) {
+export function ModelSheet({ initialPage, providers, current, thinking, projectName, running, onClose, onSelect, onThinking, onWorkspace, onSsh, onSave, onDelete }: Props) {
   const { bottom } = useSafeAreaInsets();
   const [page, setPage] = useState<Page>(initialPage);
   const [backPage, setBackPage] = useState<"settings" | "models">(initialPage);
@@ -35,6 +34,10 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const currentProvider = providers.find((provider) => provider.id === current?.providerId);
+  const options = currentProvider && current ? modelOptions(currentProvider, current.model) : undefined;
+  const choices = reasoningChoices(options);
+  const activeThinking = effectiveThinking(options, thinking);
+  const thinkLabel = options?.reasoning === false ? "不支持" : thinkingLabels[activeThinking === "off" || choices.length ? activeThinking : "on"];
   const activeLabel = current
     ? currentProvider?.models.includes(current.model) ? current.model : "模型不可用"
     : "未选择模型";
@@ -127,9 +130,9 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
                   <View style={styles.settingsGroup}>
                     {([
                       [Cpu, "当前对话模型", activeLabel, () => setPage("models")],
-                      [Brain, "思考级别", levels[thinking], () => setPage("thinking")],
+                      [Brain, "思考级别", thinkLabel, () => setPage("thinking")],
                       [FolderOpen, "工作区", projectName, onWorkspace],
-                      [Terminal, "SSH 服务器", sshEnabled ? "已启用" : "未启用", onSsh],
+                      [Terminal, "SSH 连接", "管理", onSsh],
                     ] as const).map(([Icon, label, value, onPress]) => (
                       <Pressable key={label} accessibilityRole="button" accessibilityLabel={label + "：" + value}
                         onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.selected]}>
@@ -160,6 +163,7 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
               ) : null}
               {page === "models" ? (
                 <>
+                  {running ? <Text style={styles.caption}>模型调整从下一轮生效。</Text> : null}
                   {providers.some((provider) => provider.models.length > 0) ? (
                     <View style={styles.search}>
                       <Search size={16} color={colors.secondary} />
@@ -190,13 +194,13 @@ export function ModelSheet({ initialPage, providers, current, thinking, projectN
               ) : null}
               {page === "thinking" ? (
                 <>
-                  <Text style={styles.caption}>此设置用于当前对话，需模型支持推理。</Text>
-                  {(Object.keys(levels) as ThinkingLevel[]).map((level) => (
-                    <Pressable key={level} accessibilityRole="radio" accessibilityState={{ checked: thinking === level, disabled: busy }}
+                  <Text style={styles.caption}>{options?.reasoning === false ? "当前模型标记为不支持思考。" : running ? "思考档位调整从下一轮生效。" : "此设置用于当前对话。"}</Text>
+                  {(options?.reasoning === false ? ["off"] as const : ["off", ...(choices.length ? choices : ["low"] as const)] as const).map((level) => (
+                    <Pressable key={level} accessibilityRole="radio" accessibilityState={{ checked: activeThinking === level, disabled: busy }}
                       disabled={busy} onPress={() => { void apply(() => onThinking(level), () => setPage("settings")); }}
-                      style={({ pressed }) => [styles.option, (thinking === level || pressed) && styles.selected]}>
-                      <Text style={styles.optionLabel}>{levels[level]}</Text>
-                      {thinking === level ? <Check size={17} color={colors.text} /> : null}
+                      style={({ pressed }) => [styles.option, (activeThinking === level || pressed) && styles.selected]}>
+                      <Text style={styles.optionLabel}>{thinkingLabels[level === "off" || choices.length ? level : "on"]}</Text>
+                      {activeThinking === level ? <Check size={17} color={colors.text} /> : null}
                     </Pressable>
                   ))}
                 </>

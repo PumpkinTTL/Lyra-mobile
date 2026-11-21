@@ -64,7 +64,7 @@ globalThis.lyraMockWorkspace = {
 };
 
 const { createLocalAgent } = await load("agent.js");
-const { toThreadMessages, toolFailed } = await load("chat-messages.js");
+const { toThreadMessages, toolFailed, turnArtifacts } = await load("chat-messages.js");
 const { createWorkspaceTools } = await load("workspace-tools.js");
 const { prepareUserMessage } = await load("chat-attachments.js");
 const tools = createWorkspaceTools(io);
@@ -135,6 +135,18 @@ assert.ok(attachmentMessage.content.some((part) => part.type === "text" && part.
 assert.ok(attachmentMessage.content.some((part) => part.type === "image"));
 const display = toThreadMessages([attachmentMessage], undefined, false);
 assert.equal(display[0].content.filter((part) => part.type === "file").length, 2);
+const textOnly = await prepareUserMessage("fake-workspace", "check", [{ name: "test.png", path: ".attachments/test.png", mime: "image/png", size: 16 }], undefined, false);
+assert.equal(textOnly.content.some((part) => part.type === "image"), false);
+assert.equal(toThreadMessages([textOnly], undefined, false)[0].content.filter((part) => part.type === "file").length, 1);
+
+const firstThinking = { role: "assistant", timestamp: 100, content: [{ type: "thinking", thinking: "first" }], stopReason: "stop",
+  lyraThinking: { 0: { startedAt: 100, completedAt: 120 } } };
+const nextThinking = { role: "assistant", timestamp: 200, content: [{ type: "thinking", thinking: "next" }], stopReason: "pending" };
+const thread = toThreadMessages([firstThinking], nextThinking, true, "test", "", { 0: { startedAt: 201 } });
+assert.deepEqual(thread[0].content.map(({ status }) => status.type), ["complete", "running"]);
+const links = (toolName, path) => ({ type: "tool-call", toolName, result: { artifacts: [{ projectId: "first", path }] } });
+assert.deepEqual(turnArtifacts([links("office_inspect", "source.docx"), links("office_create", "output.docx"), links("edit", "output.docx")]),
+  [{ projectId: "first", path: "output.docx" }]);
 
 function stream(model, first) {
   const chunk = (delta, finish_reason) => "data: " + JSON.stringify({

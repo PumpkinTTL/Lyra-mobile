@@ -7,7 +7,7 @@ const images = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const previewLimit = 42_000;
 const mediaLimit = 3 * 1024 * 1024;
 
-export async function prepareUserMessage(project: string, text: string, attachments: readonly WorkspaceAttachment[], signal?: AbortSignal): Promise<LocalUserMessage> {
+export async function prepareUserMessage(project: string, text: string, attachments: readonly WorkspaceAttachment[], signal?: AbortSignal, supportsImages = true): Promise<LocalUserMessage> {
   const content: (TextContent | ImageContent)[] = [{
     type: "text", text: text || "请查看这些附件。",
   }];
@@ -31,7 +31,7 @@ export async function prepareUserMessage(project: string, text: string, attachme
           }
         } catch { /* Preview failure leaves the original attachment available to the tools. */ }
       }
-    } else if (images.has(mime) && size <= mediaLimit) {
+    } else if (supportsImages && images.has(mime) && size <= mediaLimit) {
       const file = await io.read(path, mediaLimit);
       if (!file.truncated) content.push({ type: "image", mimeType: mime, data: file.base64 });
     } else if (size <= previewLimit && (mime.startsWith("text/") || /\.(json|ya?ml|toml|tsx?|[cm]?jsx?|py|rs|go|java|kt|sh|css|html?|xml|csv|log|mdx?)$/i.test(name))) {

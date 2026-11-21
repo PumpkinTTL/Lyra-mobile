@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Image, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, ExternalLink, File, Folder, FolderOpen, Plus, Share2, Upload, X } from "lucide-react-native";
+import { ArrowLeft, Check, ChevronLeft, ChevronRight, Download, ExternalLink, Folder, FolderOpen, Plus, Share2, Upload, X } from "lucide-react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { bytesFromBase64, createProject, decodeFile, exportProject, importProject, listProjects, openFile, pdfPage, projectIO, saveFile, shareFile, type FileEntry, type Project } from "./device-workspace";
 import { officeKind, readOffice, type OfficeSection } from "./office";
 import { safeModelError } from "./model-catalog";
 import { colors } from "./theme";
+import { FileIcon } from "./file-icon";
 
 type Props = {
   current: string;
@@ -217,7 +218,7 @@ export function WorkspaceSheet({ current, currentName, initialPath, allowProject
                 </View>
                 {files.map((item) => (
                   <Pressable key={item.path} accessibilityRole="button" onPress={() => view(item)} disabled={busy} style={[styles.row, focusedPath === item.path && styles.selected]}>
-                    {item.directory ? <Folder size={18} color={colors.accent} /> : <File size={17} color={colors.secondary} />}
+                    {item.directory ? <Folder size={18} color={colors.accent} /> : <FileIcon name={item.path} />}
                     <Text style={styles.rowText} numberOfLines={1}>{item.path.split("/").pop()}</Text>
                     {!item.directory ? <Text style={styles.hint}>{item.size} B</Text> : null}
                   </Pressable>
