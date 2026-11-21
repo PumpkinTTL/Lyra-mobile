@@ -1,73 +1,89 @@
-import { ComposerPrimitive, useAuiState } from "@assistant-ui/react-native";
-import { ArrowUp, Brain, ChevronDown, File, FolderOpen, Paperclip, Square, X } from "lucide-react-native";
+import { useRef, useState } from "react";
+import { AttachmentPrimitive, ComposerPrimitive, useAui, useAuiState } from "@assistant-ui/react-native";
+import { ArrowUp, ChevronDown, File, Paperclip, X } from "lucide-react-native";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import type { WorkspaceAttachment } from "./device-workspace";
+import { pickAttachments, workspaceSupported } from "./device-workspace";
+import { safeModelError } from "./model-catalog";
 import { colors } from "./theme";
 
 export type ComposerProps = {
   editable: boolean;
   running: boolean;
   modelLabel: string;
-  thinkingLabel: string;
-  projectName: string;
-  attachments: readonly WorkspaceAttachment[];
+  projectId: string;
   onModels(): void;
-  onThinking(): void;
-  onWorkspace(): void;
-  onPickAttachments(): void;
-  onRemoveAttachment(path: string): void;
-  onSendAttachments(): void;
 };
 
 export function ChatComposer(props: ComposerProps) {
-  const text = useAuiState((state) => state.composer.text);
+  const aui = useAui();
+  const attachmentCount = useAuiState((state) => state.composer.attachments.length);
+  const empty = useAuiState((state) => state.composer.isEmpty);
+  const picking = useRef(false);
+  const [attachmentError, setAttachmentError] = useState("");
   const blocked = props.running || !props.editable;
-  const sendIcon = <ArrowUp size={23} color={colors.accentInk} strokeWidth={2.4} />;
-  const pendingOnly = props.attachments.length > 0 && !text.trim();
+
+  async function addAttachment() {
+    if (blocked || picking.current) return;
+    picking.current = true;
+    setAttachmentError("");
+    try {
+      const files = await pickAttachments(props.projectId);
+      if (!files) return;
+      if (aui.composer.getState().attachments.length + files.length > 6) throw new Error("一条消息最多添加 6 个附件。");
+      for (const { name, path, mime, size } of files) {
+        await aui.composer.addAttachment({ id: path, name, type: "file", contentType: mime,
+          content: [{ type: "file", filename: name, data: path, mimeType: mime, sourceType: "id", providerMetadata: { lyra: { size } } }],
+        });
+      }
+    } catch (error) {
+      setAttachmentError(safeModelError(error));
+    } finally {
+      picking.current = false;
+    }
+  }
+
   return (
     <ComposerPrimitive.Root style={styles.composer}>
-      {props.attachments.length ? (
+      {attachmentCount ? (
         <View style={styles.attachments}>
-          {props.attachments.map((item) => (
-            <View key={item.path} style={styles.attachment}>
-              <File size={14} color={colors.accent} />
-              <Text numberOfLines={1} style={styles.attachmentName}>{item.name}</Text>
-              <Pressable accessibilityRole="button" accessibilityLabel={"移除附件 " + item.name}
-                hitSlop={8} disabled={props.running} onPress={() => props.onRemoveAttachment(item.path)}>
-                <X size={16} color={colors.secondary} />
-              </Pressable>
-            </View>
-          ))}
+          <ComposerPrimitive.Attachments>
+            {({ attachment }) => (
+              <AttachmentPrimitive.Root style={styles.attachment}>
+                <File size={14} color={colors.secondary} />
+                <AttachmentPrimitive.Name numberOfLines={1} style={styles.attachmentName} />
+                <AttachmentPrimitive.Remove accessibilityLabel={"移除附件 " + attachment.name} hitSlop={8} style={styles.remove}>
+                  <X size={15} color={colors.secondary} />
+                </AttachmentPrimitive.Remove>
+              </AttachmentPrimitive.Root>
+            )}
+          </ComposerPrimitive.Attachments>
         </View>
       ) : null}
+      {attachmentError ? <Text accessibilityRole="alert" style={styles.error}>{attachmentError}</Text> : null}
       <ComposerPrimitive.Input accessibilityLabel="消息" placeholder={props.editable ? "给 Lyra 发消息" : "选择模型后开始对话"}
         placeholderTextColor={colors.secondary} editable={!blocked} multiline style={styles.input} />
       <View style={styles.toolbar}>
-        <View style={styles.tools}>
-          <Pressable accessibilityRole="button" accessibilityLabel="添加附件" disabled={blocked} onPress={props.onPickAttachments}
-            style={[styles.icon, blocked && styles.dim]}><Paperclip size={21} color={colors.text} /></Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel={"工作区：" + props.projectName} disabled={props.running}
-            onPress={props.onWorkspace} style={styles.icon}><FolderOpen size={21} color={colors.text} /></Pressable>
-          <Pressable accessibilityRole="button" accessibilityLabel={"思考级别：" + props.thinkingLabel} disabled={blocked}
-            onPress={props.onThinking} style={[styles.icon, props.thinkingLabel !== "关闭" && styles.toolActive]}>
-            <Brain size={21} color={props.thinkingLabel !== "关闭" ? colors.accent : colors.text} />
+        <ComposerPrimitive.AddAttachment accessibilityLabel="添加附件" disabled={blocked || !workspaceSupported()} onPress={() => { void addAttachment(); }}
+          style={({ pressed }) => [styles.icon, pressed && styles.pressed, blocked && styles.dim]}>
+          <Paperclip size={20} color={colors.text} />
+        </ComposerPrimitive.AddAttachment>
+        <View style={styles.actions}>
+          <Pressable accessibilityRole="button" accessibilityLabel="选择模型" disabled={props.running} onPress={props.onModels}
+            style={({ pressed }) => [styles.model, pressed && styles.pressed]}>
+            <Text style={styles.modelLabel} numberOfLines={1}>{props.modelLabel}</Text>
+            <ChevronDown size={14} color={colors.secondary} />
           </Pressable>
+          {props.running ? (
+            <ComposerPrimitive.Cancel accessibilityLabel="停止生成" hitSlop={5} style={styles.send}>
+              <View style={styles.stop} />
+            </ComposerPrimitive.Cancel>
+          ) : (
+            <ComposerPrimitive.Send accessibilityLabel="发送消息" hitSlop={5} disabled={blocked || empty}
+              style={({ pressed }) => [styles.send, (blocked || empty || pressed) && styles.dim]}>
+              <ArrowUp size={20} color={colors.accentInk} strokeWidth={2.4} />
+            </ComposerPrimitive.Send>
+          )}
         </View>
-        <Pressable accessibilityRole="button" accessibilityLabel="选择模型" disabled={props.running} onPress={props.onModels} style={styles.model}>
-          <Text style={styles.modelLabel} numberOfLines={1}>{props.modelLabel}</Text>
-          <ChevronDown size={14} color={colors.accent} />
-        </Pressable>
-        {props.running ? (
-          <ComposerPrimitive.Cancel accessibilityLabel="停止生成" style={styles.send}>
-            <Square size={16} fill={colors.accentInk} color={colors.accentInk} />
-          </ComposerPrimitive.Cancel>
-        ) : pendingOnly ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="发送消息" disabled={blocked}
-            onPress={props.onSendAttachments} style={[styles.send, blocked && styles.dim]}>{sendIcon}</Pressable>
-        ) : (
-          <ComposerPrimitive.Send accessibilityLabel="发送消息" disabled={blocked}
-            style={({ pressed }) => [styles.send, (blocked || !text.trim() || pressed) && styles.dim]}>{sendIcon}</ComposerPrimitive.Send>
-        )}
       </View>
     </ComposerPrimitive.Root>
   );
@@ -75,20 +91,21 @@ export function ChatComposer(props: ComposerProps) {
 
 const styles = StyleSheet.create({
   composer: {
-    marginHorizontal: 14, marginTop: 4, marginBottom: 10, padding: 10, borderRadius: 23, backgroundColor: colors.surface,
-    borderWidth: 1, borderColor: colors.border, elevation: 5, shadowColor: colors.text,
-    shadowOpacity: 0.12, shadowRadius: 13, shadowOffset: { width: 0, height: 4 },
+    padding: 8, gap: 8, borderRadius: 24, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border,
   },
-  input: { minHeight: 66, maxHeight: 164, paddingHorizontal: 10, paddingVertical: 10, textAlignVertical: "top", color: colors.text, fontSize: 17, lineHeight: 25 },
-  toolbar: { flexDirection: "row", alignItems: "center", gap: 7 },
-  tools: { flexDirection: "row", alignItems: "center", gap: 1 },
-  icon: { width: 39, height: 42, borderRadius: 12, alignItems: "center", justifyContent: "center" },
-  toolActive: { backgroundColor: colors.tint },
-  model: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 7, minHeight: 39, borderRadius: 11, backgroundColor: colors.tint },
-  modelLabel: { flexShrink: 1, fontSize: 13, fontWeight: "600", color: colors.accent },
-  send: { alignItems: "center", justifyContent: "center", height: 45, width: 45, borderRadius: 15, backgroundColor: colors.accent },
-  dim: { opacity: 0.46 },
+  input: { minHeight: 52, maxHeight: 192, paddingHorizontal: 10, paddingVertical: 4, textAlignVertical: "top", color: colors.text, fontSize: 16, lineHeight: 24 },
+  toolbar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  actions: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 6 },
+  icon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  pressed: { backgroundColor: colors.tint },
+  model: { flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 6, minHeight: 44, paddingHorizontal: 10, borderRadius: 8 },
+  modelLabel: { flexShrink: 1, fontSize: 14, fontWeight: "500", color: colors.text },
+  send: { alignItems: "center", justifyContent: "center", height: 36, width: 36, borderRadius: 18, backgroundColor: colors.accent },
+  stop: { width: 12, height: 12, borderRadius: 2, backgroundColor: colors.accentInk },
+  dim: { opacity: 0.5 },
   attachments: { flexDirection: "row", flexWrap: "wrap", gap: 5, paddingHorizontal: 4, paddingTop: 2 },
-  attachment: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.tint, borderRadius: 9, paddingHorizontal: 8, minHeight: 34, maxWidth: "100%" },
+  attachment: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: colors.tint, borderRadius: 8, paddingLeft: 8, minHeight: 34, maxWidth: "100%" },
   attachmentName: { color: colors.text, fontSize: 13, flexShrink: 1 },
+  remove: { width: 32, height: 34, alignItems: "center", justifyContent: "center" },
+  error: { paddingHorizontal: 10, color: colors.error, fontSize: 14 },
 });

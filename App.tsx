@@ -1,13 +1,12 @@
 import { useState } from "react";
-import { Alert, Keyboard, KeyboardAvoidingView, Modal, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from "react-native";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { AssistantRuntimeProvider, useExternalStoreRuntime, type AppendMessage, type ThreadMessageLike } from "@assistant-ui/react-native";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { Check, Menu, Settings2, X } from "lucide-react-native";
+import { Alert, Keyboard, KeyboardAvoidingView, Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView, initialWindowMetrics } from "react-native-safe-area-context";
+import { AssistantRuntimeProvider, MessageNotSentError, useExternalStoreRuntime, type ThreadMessageLike } from "@assistant-ui/react-native";
+import { Menu, Settings2 } from "lucide-react-native";
 import { ConversationDrawer } from "./src/conversation-drawer";
 import { ModelSheet } from "./src/model-sheet";
 import { WorkspaceSheet } from "./src/workspace-sheet";
-import { defaultProject, pickAttachments, workspaceSupported, type WorkspaceAttachment } from "./src/device-workspace";
+import { defaultProject, workspaceSupported } from "./src/device-workspace";
 import { safeModelError } from "./src/model-catalog";
 import { Thread } from "./src/thread";
 import { colors } from "./src/theme";
@@ -15,34 +14,17 @@ import { useLocalChat } from "./src/use-local-chat";
 
 const convertMessage = (message: ThreadMessageLike) => message;
 type ChatState = ReturnType<typeof useLocalChat>;
-type Panel = "history" | "settings" | "models" | "workspace" | "thinking";
-const levels: Record<ThinkingLevel, string> = { off: "关闭", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高" };
+type Panel = "history" | "settings" | "models" | "workspace";
 
-function ChatRuntime({ chat, show }: { chat: ChatState; show: (panel: Panel) => void }) {
-  const [attachments, setAttachments] = useState<WorkspaceAttachment[]>([]);
-  const [picking, setPicking] = useState(false);
-  const [attachmentError, setAttachmentError] = useState("");
-  const blocked = !chat.canSend || chat.busy || picking;
+function ChatRuntime({ chat, show, close, historyOpen }: { chat: ChatState; show: (panel: Panel) => void; close: () => void; historyOpen: boolean }) {
+  const blocked = !chat.canSend || chat.busy;
 
-  async function send(text: string) {
-    if (picking) return;
-    setAttachmentError("");
-    if (await chat.send(text, attachments)) setAttachments([]);
-  }
-
-  async function attach() {
-    if (blocked || chat.running) return;
-    setAttachmentError("");
-    setPicking(true);
+  async function switchChat(action: () => Promise<void>) {
     try {
-      const files = await pickAttachments(chat.current?.projectId ?? defaultProject);
-      if (!files) return;
-      if (attachments.length + files.length > 6) throw new Error("一条消息最多添加 6 个附件。");
-      setAttachments((previous) => [...previous, ...files]);
+      await action();
+      close();
     } catch (error) {
-      setAttachmentError(safeModelError(error));
-    } finally {
-      setPicking(false);
+      Alert.alert("切换对话失败", safeModelError(error));
     }
   }
 
@@ -51,46 +33,40 @@ function ChatRuntime({ chat, show }: { chat: ChatState; show: (panel: Panel) => 
     convertMessage,
     isRunning: chat.running,
     isDisabled: blocked,
-    onNew: async (message: AppendMessage) => {
-      await send(message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join(""));
+    adapters: {
+      threadList: {
+        threadId: chat.current?.id,
+        threads: chat.conversations.map(({ id, title }) => ({ id, title, status: "regular" })),
+        onSwitchToNewThread: () => switchChat(chat.startChat),
+        onSwitchToThread: (id) => switchChat(() => chat.openChat(id)),
+      },
+    },
+    onNew: async (message) => {
+      if (message.role !== "user") return;
+      const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+      const files = (message.attachments ?? []).flatMap((attachment) => attachment.content.flatMap((part) => {
+        const size = part.type === "file" ? part.providerMetadata?.lyra?.size : undefined;
+        return part.type === "file" && typeof size === "number"
+          ? [{ name: attachment.name, path: part.data, mime: part.mimeType, size }]
+          : [];
+      }));
+      if (!await chat.send(text, files)) throw new MessageNotSentError("消息未发送。");
     },
     onCancel: async () => { chat.stop(); },
   });
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <Thread ready={chat.ready} canSend={chat.canSend} error={attachmentError || chat.error} phase={chat.phase} toolRuns={chat.toolRuns} onRetry={chat.retry}
+      <Thread ready={chat.ready} canSend={chat.canSend} error={chat.error} phase={chat.phase} toolRuns={chat.toolRuns} onRetry={chat.retry}
         composer={{
           editable: !blocked, running: chat.running, modelLabel: chat.current?.model ? chat.canSend ? chat.current.model.model : "模型不可用" : "选择模型",
-          thinkingLabel: levels[chat.current?.thinking ?? "off"], projectName: chat.current?.projectName ?? "本机工作区", attachments,
-          onModels: () => show("models"), onThinking: () => show("thinking"), onWorkspace: () => show("workspace"),
-          onPickAttachments: () => { void attach(); }, onRemoveAttachment: (path) => setAttachments((items) => items.filter((item) => item.path !== path)),
-          onSendAttachments: () => { void send(""); },
+          projectId: chat.current?.projectId ?? defaultProject, onModels: () => show("models"),
         }} />
+      {historyOpen ? (
+        <ConversationDrawer currentId={chat.current?.id} conversations={chat.conversations} disabled={!chat.ready || chat.running || chat.busy}
+          onClose={close} onSettings={() => show("settings")} onRename={chat.renameChat} onDelete={chat.deleteChat} />
+      ) : null}
     </AssistantRuntimeProvider>
-  );
-}
-
-function ThinkingSheet({ current, onSelect, onClose }: { current: ThinkingLevel; onSelect(level: ThinkingLevel): void; onClose(): void }) {
-  return (
-    <Modal animationType="slide" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safe}>
-        <View style={styles.header}>
-          <Pressable accessibilityRole="button" accessibilityLabel="关闭思考级别" onPress={onClose} style={styles.icon}><X size={22} color={colors.text} /></Pressable>
-          <Text style={styles.title}>思考级别</Text><View style={styles.icon} />
-        </View>
-        <ScrollView contentContainerStyle={styles.options}>
-          <Text style={styles.hint}>只有支持推理的模型才会返回思考过程。</Text>
-          {(Object.keys(levels) as ThinkingLevel[]).map((level) => (
-            <Pressable key={level} accessibilityRole="radio" accessibilityState={{ checked: current === level }}
-              onPress={() => onSelect(level)} style={[styles.option, current === level && styles.selected]}>
-              <Text style={styles.optionLabel}>{levels[level]}</Text>
-              {current === level ? <Check color={colors.accent} size={19} /> : null}
-            </Pressable>
-          ))}
-        </ScrollView>
-      </SafeAreaView>
-    </Modal>
   );
 }
 
@@ -121,46 +97,36 @@ function Chat() {
               <Menu size={23} color={colors.text} />
             </Pressable>
             <Text style={styles.title} numberOfLines={1}>{chat.current?.title || "Lyra"}</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel="设置" disabled={locked} onPress={() => show("settings")} style={[styles.settings, locked && styles.disabled]}>
-              <Settings2 size={19} color={colors.text} /><Text style={styles.settingsLabel}>设置</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="设置" disabled={locked} onPress={() => show("settings")} style={[styles.icon, locked && styles.disabled]}>
+              <Settings2 size={21} color={colors.text} />
             </Pressable>
           </View>
-          <ChatRuntime key={(chat.current?.id ?? "loading") + ":" + (chat.current?.projectId ?? defaultProject)} chat={chat} show={show} />
+          <ChatRuntime key={(chat.current?.id ?? "loading") + ":" + (chat.current?.projectId ?? defaultProject)}
+            chat={chat} show={show} close={close} historyOpen={panel === "history"} />
         </View>
       </KeyboardAvoidingView>
-      {panel === "history" ? (
-        <ConversationDrawer currentId={chat.current?.id} conversations={chat.conversations} disabled={locked} onClose={close}
-          onSettings={() => show("settings")} onNew={chat.startChat} onOpen={chat.openChat} onRename={chat.renameChat} onDelete={chat.deleteChat} />
-      ) : null}
       {panel === "settings" || panel === "models" ? (
         <ModelSheet initialPage={panel} providers={chat.providers} current={chat.current?.model ?? null} onClose={close}
+          thinking={chat.current?.thinking ?? "off"} onThinking={chat.chooseThinking}
+          projectName={chat.current?.projectName ?? "本机工作区"} onWorkspace={() => show("workspace")}
           onSelect={chat.chooseModel} onSave={chat.updateProvider} onDelete={chat.deleteProvider} />
       ) : null}
-      {panel === "workspace" ? <WorkspaceSheet current={chat.current?.projectId ?? defaultProject} onClose={close} onSelect={chat.chooseProject} /> : null}
-      {panel === "thinking" ? (
-        <ThinkingSheet current={chat.current?.thinking ?? "off"} onClose={close}
-          onSelect={(level) => { void chat.chooseThinking(level).then(close).catch((error) => Alert.alert("思考级别", safeModelError(error))); }} />
+      {panel === "workspace" ? (
+        <WorkspaceSheet current={chat.current?.projectId ?? defaultProject} currentName={chat.current?.projectName} onClose={close} onSelect={chat.chooseProject} />
       ) : null}
     </SafeAreaView>
   );
 }
 
 export default function App() {
-  return <SafeAreaProvider><Chat /></SafeAreaProvider>;
+  return <SafeAreaProvider initialMetrics={initialWindowMetrics}><Chat /></SafeAreaProvider>;
 }
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
   layout: { flex: 1, width: "100%", maxWidth: 700, alignSelf: "center" },
-  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 11, minHeight: 55, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border, backgroundColor: colors.surface, gap: 6 },
-  title: { flex: 1, textAlign: "center", color: colors.text, fontSize: 19, fontWeight: "700" },
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, minHeight: 52, backgroundColor: colors.background, gap: 8 },
+  title: { flex: 1, textAlign: "center", color: colors.text, fontSize: 16, fontWeight: "600" },
   icon: { height: 44, width: 44, justifyContent: "center", alignItems: "center", borderRadius: 12 },
-  settings: { flexDirection: "row", alignItems: "center", minHeight: 44, paddingHorizontal: 6, gap: 5 },
-  settingsLabel: { color: colors.text, fontWeight: "600", fontSize: 14 },
   disabled: { opacity: 0.45 },
-  options: { width: "100%", maxWidth: 600, alignSelf: "center", padding: 17, gap: 8 },
-  hint: { color: colors.secondary, fontSize: 14, marginBottom: 5 },
-  option: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 47, paddingHorizontal: 13, borderRadius: 11, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
-  optionLabel: { color: colors.text, fontSize: 15 },
-  selected: { backgroundColor: colors.tint, borderColor: colors.tintBorder },
 });

@@ -132,10 +132,17 @@ await agent.send("Read result.txt");
 assert.equal(requests, 2);
 assert.ok(events.includes("thinking_delta"));
 assert.ok(events.includes("tool_execution_start") && events.includes("tool_execution_end"));
-const transcript = toThreadMessages(agent.agent.state.messages, undefined, false);
-assert.ok(transcript.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === "reasoning")));
-assert.ok(transcript.some((message) => Array.isArray(message.content) && message.content.some((part) => part.type === "tool-call" && String(part.result).includes("updated"))));
-assert.match(JSON.stringify(transcript.at(-1)), /done with the file/);
+const agentMessages = agent.agent.state.messages;
+const transcript = toThreadMessages(agentMessages, undefined, false);
+const assistantTurns = transcript.filter((message) => message.role === "assistant");
+assert.equal(assistantTurns.length, 1);
+const [turn] = assistantTurns;
+assert.deepEqual(turn.content.map((part) => part.type), ["reasoning", "tool-call", "text"]);
+assert.match(String(turn.content[1].result), /updated/);
+assert.match(turn.content[2].text, /done with the file/);
+const streamingTurn = toThreadMessages(agentMessages.slice(0, -1), agentMessages.at(-1), true).at(-1);
+assert.equal(streamingTurn.id, turn.id);
+assert.equal(streamingTurn.status.type, "running");
 
 const cancelled = createLocalAgent({
   settings,

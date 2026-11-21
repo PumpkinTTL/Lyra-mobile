@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ActivityIndicator, Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChainOfThoughtPrimitive, ErrorPrimitive, MessagePrimitive, ThreadPrimitive } from "@assistant-ui/react-native";
-import { Activity, Brain, Check, ChevronDown, File, FolderOpen, Settings2, Terminal, TriangleAlert } from "lucide-react-native";
+import { Activity, Brain, Check, ChevronDown, File, Settings2, Terminal, TriangleAlert } from "lucide-react-native";
 import { useMarkdown } from "react-native-marked";
 import { ChatComposer, type ComposerProps } from "./chat-composer";
 import type { AgentPhase, ToolRun } from "./chat-messages";
@@ -53,9 +53,10 @@ function UserMessage() {
 function Reasoning({ text, active }: { text: string; active: boolean }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <ChainOfThoughtPrimitive.Root style={styles.event}>
-      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={styles.eventHeader}>
-        <Brain size={18} color={colors.accent} />
+    <ChainOfThoughtPrimitive.Root>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)}
+        style={({ pressed }) => [styles.eventHeader, pressed && styles.pressed]}>
+        <Brain size={16} color={colors.secondary} />
         <Text style={styles.eventTitle}>{active ? "思考中" : "思考过程"}</Text>
         {active ? <ActivityIndicator size="small" color={colors.accent} /> : null}
         <ChevronDown size={17} color={colors.secondary} style={expanded ? styles.up : undefined} />
@@ -74,16 +75,17 @@ function ToolCard({ name, run, result, failed, args }: { name: string; run?: Too
   const argLabel = args && typeof args === "object"
     ? (("path" in args && typeof args.path === "string" && args.path) || ("command" in args && typeof args.command === "string" && args.command)) : null;
   return (
-    <View style={styles.event}>
-      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)} style={styles.eventHeader}>
-        <Terminal size={17} color={colors.accent} />
+    <View>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)}
+        style={({ pressed }) => [styles.eventHeader, (pressed || expanded) && styles.pressed]}>
+        <Terminal size={16} color={colors.secondary} />
         <View style={styles.eventCaption}>
-          <Text style={styles.eventTitle}>{toolLabels[name] ?? name}</Text>
-          {argLabel ? <Text style={styles.detail} numberOfLines={1}>{argLabel}</Text> : null}
+          <Text style={styles.toolName}>{toolLabels[name] ?? name}</Text>
+          {argLabel ? <Text style={styles.eventArgument} numberOfLines={1}>{argLabel}</Text> : null}
         </View>
         {state === "error" ? <TriangleAlert size={17} color={colors.error} /> :
-          state === "done" ? <Check size={18} color={colors.accent} /> : <ActivityIndicator size="small" color={colors.accent} />}
-        <ChevronDown size={17} color={colors.secondary} style={expanded ? styles.up : undefined} />
+          state === "done" ? <Check size={14} color={colors.secondary} /> : <ActivityIndicator size="small" color={colors.secondary} />}
+        <ChevronDown size={15} color={colors.secondary} style={expanded ? styles.up : undefined} />
       </Pressable>
       {run?.output && state === "running" ? <Text accessibilityLiveRegion="polite" style={styles.progress}>{run.output}</Text> : null}
       {expanded ? (
@@ -116,11 +118,7 @@ function AssistantMessage({ runs, thinking }: { runs: Record<string, ToolRun>; t
 function Welcome({ ready, canSend, error, onRetry, composer }: Props) {
   return (
     <View style={styles.welcome}>
-      <View style={styles.welcomeIcon}><FolderOpen size={27} color={colors.accent} strokeWidth={1.75} /></View>
-      <Text style={styles.title}>开始对话</Text>
-      <Text style={styles.subtitle}>{!ready ? error ? "本地数据载入失败" : "正在载入本机会话…" : canSend
-        ? "选择工作区，再告诉 Lyra 要完成的任务。"
-        : "连接模型后，Lyra 可以在手机上处理工作区文件。"}</Text>
+      <Text style={styles.title}>{ready ? "今天想做什么？" : error ? "本地数据载入失败" : "正在载入对话…"}</Text>
       {!ready && error ? (
         <Pressable accessibilityRole="button" onPress={onRetry} style={styles.connect}><Text style={styles.connectText}>重试</Text></Pressable>
       ) : null}
@@ -136,11 +134,12 @@ function Welcome({ ready, canSend, error, onRetry, composer }: Props) {
 const phaseLabels: Record<AgentPhase, string> = { waiting: "等待模型响应", thinking: "思考中", tool: "正在调用工具", writing: "正在生成回复" };
 
 export function Thread(props: Props) {
+  const [footerHeight, setFooterHeight] = useState(142);
   const showActivity = props.composer.running && props.phase !== "writing";
   return (
     <ThreadPrimitive.Root style={styles.root}>
-      <ThreadPrimitive.MessagesFlatList style={styles.list} contentContainerStyle={styles.messages} ListEmptyComponent={<Welcome {...props} />}
-        autoScroll keyboardShouldPersistTaps="handled"
+      <ThreadPrimitive.MessagesFlatList style={styles.list} contentContainerStyle={[styles.messages, { paddingBottom: footerHeight }]}
+        ListEmptyComponent={<Welcome {...props} />} autoScroll scrollToBottomOnRunStart keyboardShouldPersistTaps="handled"
         ListFooterComponent={showActivity ? (
           <View style={styles.activity} accessibilityLiveRegion="polite">
             <Activity size={15} color={colors.accent} />
@@ -150,8 +149,10 @@ export function Thread(props: Props) {
         {({ message }) => message.role === "user" ? <UserMessage /> :
           <AssistantMessage runs={props.toolRuns} thinking={props.composer.running && props.phase === "thinking" && message.status?.type === "running"} />}
       </ThreadPrimitive.MessagesFlatList>
-      {props.error ? <Text accessibilityRole="alert" style={styles.threadError}>{props.error}</Text> : null}
-      <ChatComposer {...props.composer} />
+      <View pointerEvents="box-none" style={styles.floatingComposer} onLayout={(event) => setFooterHeight(Math.ceil(event.nativeEvent.layout.height))}>
+        {props.error ? <Text accessibilityRole="alert" style={styles.threadError}>{props.error}</Text> : null}
+        <ChatComposer {...props.composer} />
+      </View>
     </ThreadPrimitive.Root>
   );
 }
@@ -159,23 +160,24 @@ export function Thread(props: Props) {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   list: { flex: 1 },
-  messages: { flexGrow: 1, paddingHorizontal: 18, paddingVertical: 16, gap: 16 },
-  welcome: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 26, paddingHorizontal: 14 },
-  welcomeIcon: { width: 58, height: 58, borderRadius: 17, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, justifyContent: "center", alignItems: "center", marginBottom: 16 },
-  title: { color: colors.text, fontSize: 26, fontWeight: "700", textAlign: "center", marginBottom: 7 },
-  subtitle: { color: colors.secondary, fontSize: 15, lineHeight: 22, textAlign: "center", marginBottom: 18 },
-  connect: { minHeight: 44, borderRadius: 12, paddingHorizontal: 15, flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.accent },
-  connectText: { color: colors.accentInk, fontSize: 15, fontWeight: "600" },
-  userBubble: { alignSelf: "flex-end", maxWidth: "90%", backgroundColor: colors.raised, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, borderBottomRightRadius: 5, gap: 7 },
+  messages: { flexGrow: 1, paddingHorizontal: 20, paddingTop: 16, gap: 22 },
+  floatingComposer: { position: "absolute", bottom: 0, left: 0, right: 0, paddingTop: 12, paddingBottom: 8, paddingHorizontal: 16, backgroundColor: colors.background },
+  welcome: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 24, paddingHorizontal: 16, gap: 16 },
+  title: { color: colors.text, fontSize: 24, fontWeight: "500", textAlign: "center", letterSpacing: -0.3 },
+  connect: { minHeight: 44, borderRadius: 20, paddingHorizontal: 15, flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.accent },
+  connectText: { color: colors.accentInk, fontSize: 14, fontWeight: "500" },
+  userBubble: { alignSelf: "flex-end", maxWidth: "85%", backgroundColor: colors.raised, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 14, gap: 7 },
   messageText: { color: colors.text, fontSize: 16, lineHeight: 24 },
   attachment: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 25 },
   image: { width: 232, height: 157, maxWidth: "100%", backgroundColor: colors.raised, borderRadius: 10 },
-  reply: { alignSelf: "stretch", gap: 7 },
-  event: { borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, borderRadius: 13, overflow: "hidden" },
-  eventHeader: { flexDirection: "row", alignItems: "center", gap: 9, minHeight: 43, paddingVertical: 9, paddingHorizontal: 11 },
-  eventCaption: { flex: 1, gap: 2 },
-  eventTitle: { color: colors.text, fontSize: 14, fontWeight: "600", flex: 1 },
-  payload: { paddingHorizontal: 11, paddingBottom: 11, gap: 6 },
+  reply: { alignSelf: "stretch", gap: 4 },
+  eventHeader: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 40, paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8 },
+  pressed: { backgroundColor: colors.tint },
+  eventCaption: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: 8 },
+  eventTitle: { color: colors.secondary, fontSize: 14, flex: 1 },
+  toolName: { color: colors.text, fontSize: 14 },
+  eventArgument: { color: colors.secondary, fontSize: 13, flex: 1 },
+  payload: { paddingLeft: 32, paddingRight: 8, paddingVertical: 6, gap: 6 },
   detail: { color: colors.secondary, fontSize: 13, lineHeight: 19 },
   code: { padding: 8, backgroundColor: colors.raised, color: colors.text, fontFamily: "monospace", fontSize: 12, lineHeight: 18, borderRadius: 7 },
   progress: { marginLeft: 36, marginBottom: 8, color: colors.secondary, fontSize: 13 },

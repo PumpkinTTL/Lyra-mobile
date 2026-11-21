@@ -18,7 +18,7 @@ export function toThreadMessages(
     all.flatMap((message) => message.role === "toolResult" ? [[message.toolCallId, message] as const] : []),
   );
 
-  return all.flatMap((message, index): ThreadMessageLike[] => {
+  const rows = all.flatMap((message, index): ThreadMessageLike[] => {
     const id = conversationId + ":" + index;
     const createdAt = new Date(message.timestamp);
     if (message.role === "user") {
@@ -74,4 +74,16 @@ export function toThreadMessages(
             : { type: "complete", reason: "stop" },
     }];
   });
+
+  const turns: ThreadMessageLike[] = [];
+  for (const row of rows) {
+    const previous = turns.at(-1);
+    if (row.role === "assistant" && previous?.role === "assistant" && previous.status?.type !== "incomplete"
+      && typeof previous.content !== "string" && typeof row.content !== "string") {
+      turns[turns.length - 1] = { ...previous, content: [...previous.content, ...row.content], status: row.status };
+    } else {
+      turns.push(row);
+    }
+  }
+  return turns;
 }

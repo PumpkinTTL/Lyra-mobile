@@ -8,11 +8,12 @@ import { colors } from "./theme";
 
 type Props = {
   current: string;
+  currentName?: string;
   onSelect(project: Project): Promise<void>;
   onClose(): void;
 };
 
-export function WorkspaceSheet({ current, onSelect, onClose }: Props) {
+export function WorkspaceSheet({ current, currentName, onSelect, onClose }: Props) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [folder, setFolder] = useState("");
@@ -76,7 +77,7 @@ export function WorkspaceSheet({ current, onSelect, onClose }: Props) {
 
   const project = projects.find((item) => item.id === current);
   return (
-    <Modal animationType="slide" onRequestClose={onClose}>
+    <Modal animationType="slide" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
       <SafeAreaView style={styles.safe}>
         <KeyboardAvoidingView behavior="padding" style={styles.safe}>
           <View style={styles.header}>
@@ -95,13 +96,19 @@ export function WorkspaceSheet({ current, onSelect, onClose }: Props) {
             ) : (
               <>
                 <Text style={styles.section}>当前对话工作区</Text>
-                {projects.map((item) => (
-                  <Pressable key={item.id} accessibilityRole="button" accessibilityState={{ selected: item.id === current }}
-                    disabled={busy} onPress={() => choose(item)} style={[styles.row, item.id === current && styles.selected]}>
-                    <FolderOpen size={19} color={colors.accent} /><Text style={styles.rowText}>{item.name}</Text>
-                    {item.id === current ? <Check size={20} color={colors.accent} /> : null}
-                  </Pressable>
-                ))}
+                {projects.map((item) => {
+                  const selected = item.id === current;
+                  const label = item.name.trim() || (selected ? currentName?.trim() : undefined) || "未命名工作区";
+                  return (
+                    <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected }}
+                      disabled={busy} onPress={() => choose({ ...item, name: label })}
+                      style={({ pressed }) => [styles.row, (pressed || selected) && styles.selected]}>
+                      <FolderOpen size={18} color={colors.secondary} />
+                      <Text numberOfLines={1} style={styles.rowText}>{label}</Text>
+                      {selected ? <Check size={17} color={colors.text} /> : null}
+                    </Pressable>
+                  );
+                })}
                 <View style={styles.create}>
                   <TextInput accessibilityLabel="工作区名称" value={name} onChangeText={setName} maxLength={80}
                     placeholder="新工作区名称" placeholderTextColor={colors.secondary} style={styles.input} />
@@ -146,14 +153,14 @@ export function WorkspaceSheet({ current, onSelect, onClose }: Props) {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.background },
-  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, minHeight: 56, backgroundColor: colors.surface, borderBottomWidth: 1, borderColor: colors.border },
+  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, minHeight: 56, backgroundColor: colors.surface, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   icon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  title: { flex: 1, color: colors.text, fontSize: 19, fontWeight: "700", textAlign: "center" },
+  title: { flex: 1, color: colors.text, fontSize: 16, fontWeight: "600", textAlign: "center" },
   content: { width: "100%", maxWidth: 640, alignSelf: "center", padding: 18, gap: 8 },
-  section: { color: colors.text, fontWeight: "700", fontSize: 16, marginVertical: 5, flexShrink: 1 },
-  row: { flexDirection: "row", alignItems: "center", minHeight: 45, backgroundColor: colors.surface, borderRadius: 11, borderWidth: 1, borderColor: colors.border, gap: 9, paddingHorizontal: 10 },
-  selected: { backgroundColor: colors.tint, borderColor: colors.tintBorder },
-  rowText: { flex: 1, color: colors.text, fontSize: 15 },
+  section: { color: colors.secondary, fontWeight: "500", fontSize: 13, marginVertical: 5, flexShrink: 1 },
+  row: { flexDirection: "row", alignItems: "center", minHeight: 44, borderRadius: 8, gap: 10, paddingHorizontal: 10 },
+  selected: { backgroundColor: colors.tint },
+  rowText: { flex: 1, minWidth: 0, color: colors.text, fontSize: 15 },
   input: { flex: 1, backgroundColor: colors.surface, borderColor: colors.border, borderRadius: 11, borderWidth: 1, color: colors.text, minHeight: 45, paddingHorizontal: 10 },
   create: { flexDirection: "row", gap: 8 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
